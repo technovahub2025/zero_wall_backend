@@ -1,8 +1,15 @@
 const express = require('express');
-const { overview } = require('../controllers/dashboard.controller');
+const {
+  getDashboard,
+  getEmployeeDashboard,
+  getSuperadminDashboard,
+} = require('../controllers/dashboard.controller');
+const { requireAuth, requireRole } = require('../middleware/auth.middleware');
 
 const router = express.Router();
 
-router.get('/', overview);
+router.get('/', requireAuth, requireRole('superadmin', 'admin', 'employee'), getDashboard);
+router.get('/superadmin', requireAuth, requireRole('superadmin', 'admin'), getSuperadminDashboard);
+router.get('/employee', requireAuth, requireRole('superadmin', 'admin', 'employee'), getEmployeeDashboard);
 
 module.exports = router;

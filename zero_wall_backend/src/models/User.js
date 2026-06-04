@@ -1,4 +1,6 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const userSchema = new mongoose.Schema(
   {
@@ -14,16 +16,16 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       index: true,
+      match: [/^\S+@\S+\.\S+$/, 'Invalid email'],
     },
     passwordHash: {
       type: String,
-      required: true,
       select: false,
     },
     role: {
       type: String,
-      enum: ['superadmin', 'admin', 'manager', 'engineer', 'viewer'],
-      default: 'viewer',
+      enum: ['superadmin', 'admin', 'employee'],
+      default: 'employee',
     },
     refreshTokenVersion: {
       type: Number,
@@ -37,8 +39,106 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    avatarPublicId: {
+      type: String,
+      default: '',
+    },
+    phone: {
+      type: String,
+      default: '',
+    },
+    designation: {
+      type: String,
+      default: '',
+    },
+    department: {
+      type: String,
+      enum: ['Structural', 'Architectural', 'Electrical', 'PEB', 'Management', ''],
+      default: '',
+    },
+    employeeId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+    joiningDate: {
+      type: Date,
+    },
+    documents: [
+      {
+        name: String,
+        url: String,
+        publicId: String,
+        type: String,
+        uploadedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    inviteToken: {
+      type: String,
+      select: false,
+    },
+    inviteExpiry: {
+      type: Date,
+      select: false,
+    },
+    resetToken: {
+      type: String,
+      select: false,
+    },
+    resetExpiry: {
+      type: Date,
+      select: false,
+    },
+    lastLogin: {
+      type: Date,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
   },
   { timestamps: true },
 );
+
+userSchema.virtual('password').set(function setPassword(value) {
+  this._plainPassword = value;
+});
+
+userSchema.pre('save', async function hashPasswordAndAllocateEmployeeId() {
+  if (this._plainPassword) {
+    this.passwordHash = await bcrypt.hash(this._plainPassword, 12);
+    this._plainPassword = undefined;
+  }
+
+  if (this.isNew && !this.employeeId) {
+    const count = await this.constructor.countDocuments({});
+    this.employeeId = `ZW-${String(count + 1).padStart(3, '0')}`;
+  }
+});
+
+userSchema.methods.matchPassword = function matchPassword(enteredPassword) {
+  if (!this.passwordHash) {
+    return false;
+  }
+
+  return bcrypt.compare(enteredPassword, this.passwordHash);
+};
+
+userSchema.methods.generateInviteToken = function generateInviteToken() {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  this.inviteToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  this.inviteExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  return rawToken;
+};
+
+userSchema.methods.generateResetToken = function generateResetToken() {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  this.resetToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  this.resetExpiry = new Date(Date.now() + 60 * 60 * 1000);
+  return rawToken;
+};
 
 module.exports = mongoose.model('User', userSchema);

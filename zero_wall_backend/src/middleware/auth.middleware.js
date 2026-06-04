@@ -1,4 +1,5 @@
 const { verifyAccessToken } = require('../utils/jwt');
+const { requireRole } = require('./role.middleware');
 
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -10,23 +11,16 @@ function requireAuth(req, res, next) {
   }
 
   try {
-    req.user = verifyAccessToken(token);
+    const decoded = verifyAccessToken(token);
+    req.user = {
+      id: decoded.id || decoded.sub,
+      role: decoded.role,
+      email: decoded.email,
+    };
     return next();
   } catch (error) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
-}
-
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({ success: false, message: 'Unauthorized' });
-    }
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
-    }
-    return next();
-  };
 }
 
 module.exports = {

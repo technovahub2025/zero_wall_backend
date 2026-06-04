@@ -1,23 +1,39 @@
 const jwt = require('jsonwebtoken');
 
+function getAccessSecret() {
+  return process.env.JWT_ACCESS_SECRET || process.env.JWT_ACCESS_SECRET;
+}
+
+function getRefreshSecret() {
+  return process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET_KEY;
+}
+
+function getAccessExpiry() {
+  return process.env.JWT_EXPIRE || process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+}
+
+function getRefreshExpiry() {
+  return process.env.JWT_REFRESH_EXPIRE || process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+}
+
 function signAccessToken(payload) {
-  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET, {
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
+  return jwt.sign(payload, getAccessSecret(), {
+    expiresIn: getAccessExpiry(),
   });
 }
 
 function signRefreshToken(payload) {
-  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+  return jwt.sign(payload, getRefreshSecret(), {
+    expiresIn: getRefreshExpiry(),
   });
 }
 
 function verifyAccessToken(token) {
-  return jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+  return jwt.verify(token, getAccessSecret());
 }
 
 function verifyRefreshToken(token) {
-  return jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+  return jwt.verify(token, getRefreshSecret());
 }
 
 module.exports = {
@@ -25,4 +41,8 @@ module.exports = {
   signRefreshToken,
   verifyAccessToken,
   verifyRefreshToken,
+  getAccessSecret,
+  getRefreshSecret,
+  getAccessExpiry,
+  getRefreshExpiry,
 };

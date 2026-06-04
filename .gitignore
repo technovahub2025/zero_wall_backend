@@ -1,7 +1,0 @@
-# Keep the frontend sibling out of the backend repository.
-/zero_wall_frontend/
-
-# Shared local artifacts.
-/.env
-/.env.local
-/*.log
