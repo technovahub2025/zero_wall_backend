@@ -1,5 +1,7 @@
 const TeamMember = require('../models/TeamMember');
 const User = require('../models/User');
+const Project = require('../models/Project');
+const Task = require('../models/Task');
 const crypto = require('crypto');
 const { sendEmail, inviteEmailTemplate } = require('../utils/sendEmail');
 const asyncHandler = require('../utils/asyncHandler');
@@ -62,6 +64,8 @@ function serializeUser(user) {
     employeeId: item.employeeId,
     joiningDate: item.joiningDate || null,
     isActive: item.isActive,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
   };
 }
 
@@ -89,9 +93,144 @@ async function buildInvite(user, inviter) {
 
 const listMembers = asyncHandler(async (req, res) => {
   const members = await User.find({ role: { $ne: 'superadmin' }, isActive: true }).sort({ createdAt: -1 });
+  const memberIds = members.map((member) => member._id);
+
+  const [projectRows, taskRows] = await Promise.all([
+    memberIds.length
+      ? Project.aggregate([
+          {
+            $match: {
+              $or: [{ responsibleEngineer: { $in: memberIds } }, { assignedTeam: { $in: memberIds } }],
+            },
+          },
+          {
+            $project: {
+              projectName: 1,
+              overallStatus: 1,
+              currentStage: 1,
+              responsibleEngineer: 1,
+              assignedTeam: 1,
+            },
+          },
+          {
+            $addFields: {
+              members: {
+                $concatArrays: [
+                  {
+                    $cond: [
+                      { $ifNull: ['$responsibleEngineer', false] },
+                      ['$responsibleEngineer'],
+                      [],
+                    ],
+                  },
+                  { $ifNull: ['$assignedTeam', []] },
+                ],
+              },
+            },
+          },
+          { $unwind: '$members' },
+          {
+            $group: {
+              _id: '$members',
+              projectCount: { $sum: 1 },
+              projects: {
+                $push: {
+                  id: '$_id',
+                  name: '$projectName',
+                  status: '$overallStatus',
+                  stage: '$currentStage',
+                },
+              },
+            },
+          },
+        ])
+      : [],
+    memberIds.length
+      ? Task.aggregate([
+          {
+            $match: {
+              $or: [{ assignee: { $in: memberIds } }, { reporter: { $in: memberIds } }, { assignedTeam: { $in: memberIds } }],
+            },
+          },
+          {
+            $lookup: {
+              from: 'projects',
+              localField: 'project',
+              foreignField: '_id',
+              as: 'projectDoc',
+            },
+          },
+          {
+            $unwind: {
+              path: '$projectDoc',
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $project: {
+              title: 1,
+              status: 1,
+              dueDate: 1,
+              projectName: '$projectDoc.projectName',
+              projectStatus: '$projectDoc.overallStatus',
+              projectStage: '$projectDoc.currentStage',
+              assignee: 1,
+              reporter: 1,
+              assignedTeam: 1,
+            },
+          },
+          {
+            $addFields: {
+              members: {
+                $concatArrays: [
+                  { $cond: [{ $ifNull: ['$assignee', false] }, ['$assignee'], []] },
+                  { $cond: [{ $ifNull: ['$reporter', false] }, ['$reporter'], []] },
+                  { $ifNull: ['$assignedTeam', []] },
+                ],
+              },
+            },
+          },
+          { $unwind: '$members' },
+          {
+            $group: {
+              _id: '$members',
+              taskCount: { $sum: 1 },
+              tasks: {
+                $push: {
+                  id: '$_id',
+                  title: '$title',
+                  status: '$status',
+                  dueDate: '$dueDate',
+                  projectName: '$projectName',
+                  projectStatus: '$projectStatus',
+                  projectStage: '$projectStage',
+                },
+              },
+            },
+          },
+        ])
+      : [],
+  ]);
+
+  const projectMap = new Map(projectRows.map((row) => [String(row._id), row]));
+  const taskMap = new Map(taskRows.map((row) => [String(row._id), row]));
   return res.json({
     success: true,
-    data: members.map(serializeUser),
+    data: members.map((member) => {
+      const memberId = String(member._id);
+      const projectRow = projectMap.get(memberId) || {};
+      const taskRow = taskMap.get(memberId) || {};
+      const projects = Array.isArray(projectRow.projects) ? projectRow.projects : [];
+      const tasks = Array.isArray(taskRow.tasks) ? taskRow.tasks : [];
+      return {
+        ...serializeUser(member),
+        teamName: member.department || 'Unassigned',
+        projectCount: Number(projectRow.projectCount || 0),
+        taskCount: Number(taskRow.taskCount || 0),
+        currentProjects: projects.slice(0, 3),
+        currentTasks: tasks.slice(0, 3),
+      };
+    }),
   });
 });
 
@@ -104,7 +243,16 @@ const listPendingInvites = asyncHandler(async (req, res) => {
 });
 
 const inviteMember = asyncHandler(async (req, res) => {
-  const { name, email, role = 'employee', phone = '', designation = '', department = '', sendInvite = true } = req.body;
+  const {
+    name,
+    email,
+    role = 'employee',
+    phone = '',
+    designation = '',
+    department = '',
+    sendInvite = true,
+    projectIds = [],
+  } = req.body;
   if (!email) {
     return res.status(400).json({ success: false, message: 'Email is required' });
   }
@@ -125,6 +273,21 @@ const inviteMember = asyncHandler(async (req, res) => {
   }
 
   await user.save();
+
+  const normalizedProjectIds = Array.isArray(projectIds)
+    ? projectIds
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+    : typeof projectIds === 'string'
+      ? projectIds
+          .split(',')
+          .map((item) => String(item).trim())
+          .filter(Boolean)
+      : [];
+
+  if (normalizedProjectIds.length) {
+    await Project.updateMany({ _id: { $in: normalizedProjectIds } }, { $addToSet: { assignedTeam: user._id } });
+  }
 
   return res.status(201).json({
     success: true,
@@ -184,6 +347,11 @@ const removeMember = asyncHandler(async (req, res) => {
   if (!user) {
     return res.status(404).json({ success: false, message: 'Member not found' });
   }
+
+  await Project.updateMany(
+    { assignedTeam: user._id },
+    { $pull: { assignedTeam: user._id }, $set: { updatedAt: new Date() } },
+  );
 
   user.isActive = false;
   await user.save();

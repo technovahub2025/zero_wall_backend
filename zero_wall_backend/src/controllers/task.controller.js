@@ -3,6 +3,7 @@ const Task = require('../models/Task');
 const Project = require('../models/Project');
 const Stage = require('../models/Stage');
 const User = require('../models/User');
+const Team = require('../models/Team');
 const asyncHandler = require('../utils/asyncHandler');
 const { createNotification } = require('../utils/createNotification');
 const { emitToProject } = require('../config/socket');
@@ -13,6 +14,10 @@ const MAX_TASKS_PER_REQUEST = 50;
 
 function serializeTask(task) {
   const doc = task.toObject ? task.toObject({ virtuals: true }) : task;
+  const reporter = doc.reporter || doc.createdBy || null;
+  const team = doc.team || null;
+  const assignedTeam = doc.assignedTeam || [];
+  const teamMembers = Array.isArray(team?.members) ? team.members : [];
   return {
     id: doc._id,
     title: doc.title,
@@ -20,7 +25,12 @@ function serializeTask(task) {
     project: doc.project,
     stage: doc.stage,
     assignee: doc.assignee,
+    team,
+    teamName: team?.name || '',
+    teamMembers,
+    assignedTeam,
     backupReviewer: doc.backupReviewer,
+    reporter,
     priority: doc.priority,
     status: doc.status,
     startDate: doc.startDate,
@@ -33,9 +43,39 @@ function serializeTask(task) {
     order: doc.order,
     totalTimeLogged: doc.totalTimeLogged,
     createdBy: doc.createdBy,
+    reporterName: reporter?.name || '',
+    teamMemberNames: teamMembers.map((member) => member?.name || member?.label || '').filter(Boolean),
+    assignedTeamNames: assignedTeam
+      .map((member) => member?.name || member?.label || '')
+      .filter(Boolean),
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
+}
+
+async function getUserTeamIds(userId) {
+  if (!userId) return [];
+  const teams = await Team.find({ members: userId }).select('_id');
+  return teams.map((team) => String(team._id));
+}
+
+function populateTaskRelations(query) {
+  return query
+    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
+    .populate('stage', 'stageName stageNo')
+    .populate('assignee', 'name email role avatar employeeId designation department')
+    .populate('assignedTeam', 'name email role avatar employeeId designation department')
+    .populate('backupReviewer', 'name email role avatar')
+    .populate('createdBy', 'name email role avatar')
+    .populate('reporter', 'name email role avatar employeeId designation department')
+    .populate({
+      path: 'team',
+      select: 'name description color members isActive',
+      populate: {
+        path: 'members',
+        select: 'name email role avatar employeeId designation department',
+      },
+    });
 }
 
 function escapeRegex(value = '') {
@@ -60,7 +100,7 @@ function parseTaskScope(req) {
   return null;
 }
 
-function buildTaskFilter(req) {
+async function buildTaskFilter(req) {
   const scope = parseTaskScope(req);
   if (!scope) {
     return { error: 'Project or mine scope is required' };
@@ -73,7 +113,13 @@ function buildTaskFilter(req) {
     }
     filter.project = scope.projectId;
   } else {
-    filter.assignee = req.user?.id;
+    const teamIds = await getUserTeamIds(req.user?.id);
+    filter.$or = [
+      { assignee: req.user?.id },
+      { reporter: req.user?.id },
+      { assignedTeam: req.user?.id },
+      ...(teamIds.length ? [{ team: { $in: teamIds } }] : []),
+    ];
   }
 
   if (req.query.assignee) filter.assignee = req.query.assignee;
@@ -83,7 +129,13 @@ function buildTaskFilter(req) {
   const search = String(req.query.search || '').trim();
   if (search) {
     const regex = new RegExp(escapeRegex(search), 'i');
-    filter.$or = [{ title: regex }, { description: regex }];
+    const searchMatch = [{ title: regex }, { description: regex }];
+    if (filter.$or) {
+      filter.$and = [{ $or: filter.$or }, { $or: searchMatch }];
+      delete filter.$or;
+    } else {
+      filter.$or = searchMatch;
+    }
   }
 
   return { filter, scope };
@@ -131,6 +183,13 @@ function toDate(value, fallback = null) {
 function normalizeTaskInput(body = {}, existing = null) {
   const stage = body.stage ?? body.stageId ?? existing?.stage ?? null;
   const assignee = body.assignee ?? body.assigneeId ?? existing?.assignee ?? null;
+  const reporter = body.reporter ?? body.reporterId ?? existing?.reporter ?? existing?.createdBy ?? null;
+  const team = body.team ?? body.teamId ?? existing?.team ?? null;
+  const assignedTeam = Array.isArray(body.assignedTeam)
+    ? body.assignedTeam.filter(Boolean)
+    : typeof body.assignedTeam === 'string'
+      ? body.assignedTeam.split(',').map((item) => String(item).trim()).filter(Boolean)
+      : existing?.assignedTeam || [];
   const backupReviewer = body.backupReviewer ?? body.backupReviewerId ?? existing?.backupReviewer ?? null;
   const tags = Array.isArray(body.tags)
     ? body.tags.filter(Boolean).map((item) => String(item).trim()).filter(Boolean)
@@ -145,7 +204,10 @@ function normalizeTaskInput(body = {}, existing = null) {
     startDate: toDate(body.startDate, existing?.startDate || null),
     stage: stage === '' ? null : stage,
     assignee: assignee === '' ? null : assignee,
+    team: team === '' ? null : team,
+    assignedTeam,
     backupReviewer: backupReviewer === '' ? null : backupReviewer,
+    reporter: reporter === '' ? null : reporter,
     priority: body.priority ?? existing?.priority ?? 'Medium',
     status: body.status ?? existing?.status ?? 'todo',
     dueDate: toDate(body.dueDate, existing?.dueDate || null),
@@ -167,11 +229,22 @@ async function canAccessTask(req, task) {
     return true;
   }
 
-  return String(task.assignee?._id || task.assignee) === String(req.user?.id);
+  const userId = String(req.user?.id);
+  const assigneeId = String(task.assignee?._id || task.assignee);
+  const reporterId = String(task.reporter?._id || task.reporter || task.createdBy?._id || task.createdBy);
+  const assignedTeam = Array.isArray(task.assignedTeam) ? task.assignedTeam : [];
+  const isTeamMember = assignedTeam.some((member) => String(member?._id || member) === userId);
+  const taskTeam = task.team && typeof task.team === 'object' ? task.team : null;
+  let isAssignedTeamMember = Array.isArray(taskTeam?.members) && taskTeam.members.some((member) => String(member?._id || member) === userId);
+  if (!isAssignedTeamMember && task.team && !taskTeam) {
+    isAssignedTeamMember = Boolean(await Team.exists({ _id: task.team, members: userId }));
+  }
+
+  return userId === assigneeId || userId === reporterId || isTeamMember || isAssignedTeamMember;
 }
 
 const listTasks = asyncHandler(async (req, res) => {
-  const scoped = buildTaskFilter(req);
+  const scoped = await buildTaskFilter(req);
   if (scoped.error) {
     return res.status(scoped.code || 400).json({ success: false, message: scoped.error });
   }
@@ -179,14 +252,11 @@ const listTasks = asyncHandler(async (req, res) => {
   const { filter } = scoped;
   const limit = parseTaskLimit(req.query.limit);
   const total = await Task.countDocuments(filter);
-  const tasks = await Task.find(filter)
-    .sort({ order: 1, dueDate: 1, createdAt: -1 })
-    .limit(limit)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+  const tasks = await populateTaskRelations(
+    Task.find(filter)
+      .sort({ order: 1, dueDate: 1, createdAt: -1 })
+      .limit(limit),
+  );
 
   return res.json({
     success: true,
@@ -202,16 +272,21 @@ const listTasks = asyncHandler(async (req, res) => {
 
 const getMyTasks = asyncHandler(async (req, res) => {
   const limit = parseTaskLimit(req.query.limit);
-  const filter = { assignee: req.user.id };
+  const teamIds = await getUserTeamIds(req.user.id);
+  const filter = {
+    $or: [
+      { assignee: req.user.id },
+      { reporter: req.user.id },
+      { assignedTeam: req.user.id },
+      ...(teamIds.length ? [{ team: { $in: teamIds } }] : []),
+    ],
+  };
   const total = await Task.countDocuments(filter);
-  const tasks = await Task.find(filter)
-    .sort({ dueDate: 1, order: 1 })
-    .limit(limit)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+  const tasks = await populateTaskRelations(
+    Task.find(filter)
+      .sort({ dueDate: 1, order: 1 })
+      .limit(limit),
+  );
 
   return res.json({
     success: true,
@@ -226,12 +301,7 @@ const getMyTasks = asyncHandler(async (req, res) => {
 });
 
 const getTaskById = asyncHandler(async (req, res) => {
-  const task = await Task.findById(req.params.id)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+  const task = await populateTaskRelations(Task.findById(req.params.id));
 
   if (!task) {
     return res.status(404).json({ success: false, message: 'Task not found' });
@@ -272,14 +342,10 @@ const createTask = asyncHandler(async (req, res) => {
     order: Number.isFinite(Number(req.body.order)) ? Number(req.body.order) : existingCount + 1,
     stage: resolvedStage?._id || null,
     createdBy: req.user?.id || null,
+    reporter: req.body.reporter || req.user?.id || null,
   });
 
-  const populated = await Task.findById(task._id)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+  const populated = await populateTaskRelations(Task.findById(task._id));
 
   if (populated?.assignee && String(populated.assignee._id || populated.assignee) !== String(req.user?.id)) {
     await createNotification({
@@ -328,7 +394,10 @@ const updateTask = asyncHandler(async (req, res) => {
 
   const userId = String(req.user?.id);
   const assigneeId = String(task.assignee);
-  if (req.user?.role === 'employee' && userId !== assigneeId) {
+  const reporterId = String(task.reporter || task.createdBy || '');
+  const teamMatch = Array.isArray(task.assignedTeam) && task.assignedTeam.some((member) => String(member) === userId);
+  const teamMemberMatch = task.team ? await Team.exists({ _id: task.team, members: userId }) : false;
+  if (req.user?.role === 'employee' && userId !== assigneeId && userId !== reporterId && !teamMatch && !teamMemberMatch) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
 
@@ -342,12 +411,7 @@ const updateTask = asyncHandler(async (req, res) => {
   }
   await task.save();
 
-  const populated = await Task.findById(task._id)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+  const populated = await populateTaskRelations(Task.findById(task._id));
 
   emitToProject(populated.project?._id || populated.project, 'task:updated', serializeTask(populated));
   await logActivity({
@@ -413,7 +477,7 @@ const reorderTasks = asyncHandler(async (req, res) => {
 });
 
 const getTaskCounts = asyncHandler(async (req, res) => {
-  const scoped = buildTaskFilter(req);
+  const scoped = await buildTaskFilter(req);
   if (scoped.error) {
     return res.status(scoped.code || 400).json({ success: false, message: scoped.error });
   }
@@ -533,13 +597,9 @@ const addComment = asyncHandler(async (req, res) => {
   });
   await task.save();
 
-  const populated = await Task.findById(task._id)
-    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
-    .populate('stage', 'stageName stageNo')
-    .populate('assignee', 'name email role avatar employeeId designation department')
-    .populate('backupReviewer', 'name email role avatar')
-    .populate('comments.user', 'name email role avatar employeeId designation department')
-    .populate('createdBy', 'name email role avatar');
+  const populated = await populateTaskRelations(
+    Task.findById(task._id).populate('comments.user', 'name email role avatar employeeId designation department'),
+  );
 
   emitToProject(task.project, 'comment:added', {
     taskId: task._id,

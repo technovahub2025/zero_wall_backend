@@ -8,6 +8,7 @@ const {
   uploadAsset,
   uploadAvatar: uploadAvatarController,
   uploadDocument,
+  updateDocument,
 } = require('../controllers/upload.controller');
 
 const router = express.Router();
@@ -15,6 +16,7 @@ const router = express.Router();
 router.post('/asset', legacyUpload.single('file'), uploadAsset);
 router.post('/avatar', requireAuth, uploadAvatar, uploadAvatarController);
 router.post('/document', requireAuth, uploadSingle, uploadDocument);
+router.put('/:publicId', requireAuth, requireRole('superadmin', 'admin'), uploadSingle, updateDocument);
 router.delete('/:publicId', requireAuth, requireRole('superadmin', 'admin'), deleteDocument);
 router.get('/project/:id', requireAuth, getProjectDocuments);
 

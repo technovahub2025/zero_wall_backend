@@ -3,6 +3,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const User = require('../models/User');
 const Task = require('../models/Task');
 const Project = require('../models/Project');
+const Team = require('../models/Team');
 const TimerLog = require('../models/TimerLog');
 const { sendEmail, inviteEmailTemplate } = require('../utils/sendEmail');
 const { createNotification } = require('../utils/createNotification');
@@ -58,6 +59,12 @@ async function sendInviteIfRequested(user, req) {
   return inviteUrl;
 }
 
+async function getTeamIdsForMember(userId) {
+  if (!userId) return [];
+  const teams = await Team.find({ members: userId }).select('_id');
+  return teams.map((team) => team._id);
+}
+
 const listEmployees = asyncHandler(async (req, res) => {
   const search = String(req.query.search || '').trim();
   const department = String(req.query.department || '').trim();
@@ -92,13 +99,31 @@ const getEmployee = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Employee not found' });
   }
 
-  const tasks = await Task.find({ assignee: employee._id })
+  const teamIds = await getTeamIdsForMember(employee._id);
+  const tasks = await Task.find({
+    $or: [
+      { assignee: employee._id },
+      { reporter: employee._id },
+      { assignedTeam: employee._id },
+      ...(teamIds.length ? [{ team: { $in: teamIds } }] : []),
+    ],
+  })
     .sort({ dueDate: 1, order: 1 })
     .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
     .populate('stage', 'stageName stageNo')
     .populate('assignee', 'name email role avatar employeeId designation department')
+    .populate('assignedTeam', 'name email role avatar employeeId designation department')
     .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+    .populate('createdBy', 'name email role avatar')
+    .populate('reporter', 'name email role avatar employeeId designation department')
+    .populate({
+      path: 'team',
+      select: 'name description color members isActive',
+      populate: {
+        path: 'members',
+        select: 'name email role avatar employeeId designation department',
+      },
+    });
 
   const projects = await Project.find({
     $or: [{ responsibleEngineer: employee._id }, { assignedTeam: employee._id }],
@@ -229,13 +254,31 @@ const deactivateEmployee = asyncHandler(async (req, res) => {
 });
 
 const getEmployeeTasks = asyncHandler(async (req, res) => {
-  const tasks = await Task.find({ assignee: req.params.id })
+  const teamIds = await getTeamIdsForMember(req.params.id);
+  const tasks = await Task.find({
+    $or: [
+      { assignee: req.params.id },
+      { reporter: req.params.id },
+      { assignedTeam: req.params.id },
+      ...(teamIds.length ? [{ team: { $in: teamIds } }] : []),
+    ],
+  })
     .sort({ dueDate: 1, order: 1 })
     .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
     .populate('stage', 'stageName stageNo')
     .populate('assignee', 'name email role avatar employeeId designation department')
+    .populate('assignedTeam', 'name email role avatar employeeId designation department')
     .populate('backupReviewer', 'name email role avatar')
-    .populate('createdBy', 'name email role avatar');
+    .populate('createdBy', 'name email role avatar')
+    .populate('reporter', 'name email role avatar employeeId designation department')
+    .populate({
+      path: 'team',
+      select: 'name description color members isActive',
+      populate: {
+        path: 'members',
+        select: 'name email role avatar employeeId designation department',
+      },
+    });
 
   const grouped = tasks.reduce(
     (acc, task) => {
@@ -263,7 +306,24 @@ const getEmployeeTasks = asyncHandler(async (req, res) => {
 });
 
 const getEmployeeWorkload = asyncHandler(async (req, res) => {
-  const tasks = await Task.find({ assignee: req.params.id }).populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment');
+  const teamIds = await getTeamIdsForMember(req.params.id);
+  const tasks = await Task.find({
+    $or: [
+      { assignee: req.params.id },
+      { reporter: req.params.id },
+      { assignedTeam: req.params.id },
+      ...(teamIds.length ? [{ team: { $in: teamIds } }] : []),
+    ],
+  })
+    .populate('project', 'projectName clientName overallStatus currentStage stageCompletion projectValue companySegment')
+    .populate({
+      path: 'team',
+      select: 'name description color members isActive',
+      populate: {
+        path: 'members',
+        select: 'name email role avatar employeeId designation department',
+      },
+    });
   const projects = await Project.find({
     $or: [{ responsibleEngineer: req.params.id }, { assignedTeam: req.params.id }],
   }).sort({ createdAt: -1 });

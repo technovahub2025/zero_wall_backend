@@ -66,7 +66,14 @@ const uploadAvatar = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'No file uploaded' });
   }
 
-  const user = await User.findById(req.user.id).select('+avatarPublicId');
+  const { employeeId } = req.body;
+  const targetUserId = employeeId ? String(employeeId) : String(req.user.id);
+  const canEditTarget = !employeeId || targetUserId === String(req.user.id) || ['superadmin', 'admin', 'project_manager'].includes(req.user.role);
+  if (!canEditTarget) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const user = await User.findById(targetUserId).select('+avatarPublicId');
   if (!user) {
     return res.status(404).json({ success: false, message: 'User not found' });
   }
@@ -93,9 +100,9 @@ const uploadAvatar = asyncHandler(async (req, res) => {
 
   return res.json({
     success: true,
-    message: 'Avatar uploaded',
+    message: employeeId ? 'Employee avatar uploaded' : 'Avatar uploaded',
     avatarUrl: result.secure_url,
-    data: { avatarUrl: result.secure_url },
+    data: { avatarUrl: result.secure_url, employeeId: targetUserId, updatedAt: user.updatedAt },
   });
 });
 
@@ -188,6 +195,66 @@ const deleteDocument = asyncHandler(async (req, res) => {
   });
 });
 
+const updateDocument = asyncHandler(async (req, res) => {
+  const publicId = decodeURIComponent(req.params.publicId);
+  const document = await Document.findOne({ publicId });
+
+  if (!document) {
+    return res.status(404).json({ success: false, message: 'Document not found' });
+  }
+
+  const { originalName, category } = req.body;
+  if (originalName !== undefined) {
+    document.originalName = String(originalName || '').trim() || document.originalName;
+  }
+  if (category !== undefined) {
+    document.category = category || document.category;
+  }
+
+  if (req.file) {
+    const folder = document.project
+      ? `zerowall/projects/${document.project}`
+      : document.employee
+        ? `zerowall/employees/${document.employee}`
+        : 'zerowall/general';
+
+    const replacement = await uploadToCloudinary(req.file.buffer, {
+      folder,
+      use_filename: true,
+      unique_filename: true,
+      resource_type: 'auto',
+    });
+
+    try {
+      await cloudinary.uploader.destroy(document.publicId, { resource_type: 'auto' });
+    } catch (error) {
+      // ignore cleanup failure
+    }
+
+    document.filename = replacement.original_filename || req.file.originalname;
+    document.originalName = String(originalName || req.file.originalname || document.originalName).trim();
+    document.cloudinaryUrl = replacement.secure_url;
+    document.publicId = replacement.public_id;
+    document.fileType = getFileType(req.file.mimetype);
+    document.mimeType = req.file.mimetype;
+    document.size = req.file.size;
+  }
+
+  await document.save();
+
+  const populated = await Document.findById(document._id)
+    .populate('uploadedBy', 'name avatar role employeeId')
+    .populate('project', 'projectName clientName')
+    .populate('stage', 'stageName stageNo')
+    .populate('employee', 'name avatar role employeeId');
+
+  return res.json({
+    success: true,
+    message: 'Document updated',
+    data: serializeDocument(populated),
+  });
+});
+
 const getProjectDocuments = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const documents = await Document.find({ project: id })
@@ -222,6 +289,7 @@ module.exports = {
   uploadAvatar,
   uploadDocument,
   deleteDocument,
+  updateDocument,
   getProjectDocuments,
   getEmployeeDocuments,
   uploadToCloudinary,

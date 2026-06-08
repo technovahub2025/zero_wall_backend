@@ -26,6 +26,17 @@ const taskSchema = new mongoose.Schema(
       ref: 'User',
       index: true,
     },
+    team: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Team',
+      index: true,
+    },
+    assignedTeam: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
     backupReviewer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -72,6 +83,11 @@ const taskSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+    },
+    reporter: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      index: true,
     },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
