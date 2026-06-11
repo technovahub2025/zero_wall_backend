@@ -4,9 +4,11 @@ const Project = require('../models/Project');
 const Stage = require('../models/Stage');
 const User = require('../models/User');
 const Team = require('../models/Team');
+const TimerLog = require('../models/TimerLog');
+const TaskTimeExtensionRequest = require('../models/TaskTimeExtensionRequest');
 const asyncHandler = require('../utils/asyncHandler');
 const { createNotification } = require('../utils/createNotification');
-const { emitToProject } = require('../config/socket');
+const { emitToAll, emitToProject } = require('../config/socket');
 const { logActivity } = require('../utils/logActivity');
 const mongoose = require('mongoose');
 
@@ -18,6 +20,7 @@ function serializeTask(task) {
   const team = doc.team || null;
   const assignedTeam = doc.assignedTeam || [];
   const teamMembers = Array.isArray(team?.members) ? team.members : [];
+  const timerStatus = getEffectiveTimerStatus(doc);
   return {
     id: doc._id,
     title: doc.title,
@@ -36,6 +39,14 @@ function serializeTask(task) {
     startDate: doc.startDate,
     dueDate: doc.dueDate,
     completedAt: doc.completedAt,
+    estimatedDurationMinutes: Number(doc.estimatedDurationMinutes || 0),
+    timerStartedAt: doc.timerStartedAt,
+    timerExpiresAt: doc.timerExpiresAt,
+    timerStatus,
+    extraTimeMinutesGranted: Number(doc.extraTimeMinutesGranted || 0),
+    activeTimerLog: doc.activeTimerLog,
+    pendingTimeExtensionRequest: doc.pendingTimeExtensionRequest || null,
+    latestTimeExtensionRequest: doc.latestTimeExtensionRequest || null,
     nextAction: doc.nextAction,
     tags: doc.tags || [],
     attachments: doc.attachments || [],
@@ -51,6 +62,70 @@ function serializeTask(task) {
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
+}
+
+function getEffectiveTimerStatus(task) {
+  const rawStatus = task.timerStatus || 'not_started';
+  if (task.status === 'done' || rawStatus === 'completed') return 'completed';
+  if (task.timerExpiresAt && ['running', 'extended'].includes(rawStatus) && new Date(task.timerExpiresAt).getTime() <= Date.now()) {
+    return 'expired';
+  }
+  return rawStatus;
+}
+
+function serializeTimeExtensionRequest(request) {
+  if (!request) return null;
+  const doc = request.toObject ? request.toObject({ virtuals: true }) : request;
+  return {
+    id: doc._id,
+    task: doc.task,
+    employee: doc.employee,
+    requestedMinutes: Number(doc.requestedMinutes || 0),
+    reason: doc.reason || '',
+    status: doc.status,
+    approvedBy: doc.approvedBy,
+    rejectedBy: doc.rejectedBy,
+    decidedAt: doc.decidedAt,
+    decisionNote: doc.decisionNote || '',
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function canApproveTimeExtension(user, task) {
+  if (!user || !task) return false;
+  const userId = String(user.id);
+  const reporterId = String(task.reporter?._id || task.reporter || '');
+  const creatorId = String(task.createdBy?._id || task.createdBy || '');
+  const assigneeId = String(task.assignee?._id || task.assignee || '');
+  return userId === reporterId || userId === creatorId || userId === assigneeId;
+}
+
+async function serializeTasksWithRequests(tasks) {
+  const taskIds = tasks.map((task) => task?._id || task?.id).filter(Boolean);
+  if (!taskIds.length) return tasks.map(serializeTask);
+
+  const requests = await TaskTimeExtensionRequest.find({ task: { $in: taskIds } })
+    .sort({ createdAt: -1 })
+    .populate('employee', 'name email role avatar employeeId')
+    .populate('approvedBy', 'name email role avatar employeeId')
+    .populate('rejectedBy', 'name email role avatar employeeId');
+
+  const byTask = requests.reduce((acc, request) => {
+    const key = String(request.task?._id || request.task);
+    if (!acc.has(key)) acc.set(key, []);
+    acc.get(key).push(request);
+    return acc;
+  }, new Map());
+
+  return tasks.map((task) => {
+    const doc = task.toObject ? task.toObject({ virtuals: true }) : { ...task };
+    const taskRequests = byTask.get(String(doc._id || doc.id)) || [];
+    const pending = taskRequests.find((request) => request.status === 'pending') || null;
+    doc.pendingTimeExtensionRequest = serializeTimeExtensionRequest(pending);
+    doc.latestTimeExtensionRequest = serializeTimeExtensionRequest(taskRequests[0] || null);
+    return serializeTask(doc);
+  });
 }
 
 async function getUserTeamIds(userId) {
@@ -180,6 +255,13 @@ function toDate(value, fallback = null) {
   return Number.isNaN(date.getTime()) ? fallback : date;
 }
 
+function toPositiveMinutes(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.floor(parsed);
+}
+
 function normalizeTaskInput(body = {}, existing = null) {
   const stage = body.stage ?? body.stageId ?? existing?.stage ?? null;
   const assignee = body.assignee ?? body.assigneeId ?? existing?.assignee ?? null;
@@ -212,6 +294,7 @@ function normalizeTaskInput(body = {}, existing = null) {
     status: body.status ?? existing?.status ?? 'todo',
     dueDate: toDate(body.dueDate, existing?.dueDate || null),
     completedAt: toDate(body.completedAt, existing?.completedAt || null),
+    estimatedDurationMinutes: toPositiveMinutes(body.estimatedDurationMinutes, existing?.estimatedDurationMinutes || 0),
     nextAction: body.nextAction ?? existing?.nextAction ?? '',
     tags,
     attachments: Array.isArray(body.attachments) ? body.attachments : existing?.attachments || [],
@@ -222,6 +305,38 @@ function normalizeTaskInput(body = {}, existing = null) {
       ? Number(body.totalTimeLogged ?? existing?.totalTimeLogged)
       : existing?.totalTimeLogged || 0,
   };
+}
+
+async function finishBudgetedTimerForTask(task, userId = null) {
+  if (!task?.activeTimerLog) return;
+  const activeLog = await TimerLog.findById(task.activeTimerLog);
+  if (!activeLog || !activeLog.isActive) {
+    task.activeTimerLog = undefined;
+    return;
+  }
+
+  activeLog.endTime = new Date();
+  activeLog.isActive = false;
+  await activeLog.save();
+  task.totalTimeLogged = Number(task.totalTimeLogged || 0) + Number(activeLog.duration || 0);
+  task.activeTimerLog = undefined;
+  task.timerStatus = 'completed';
+
+  await logActivity({
+    actor: userId,
+    action: 'task_timer_completed',
+    entityType: 'task',
+    entityId: task._id,
+    project: task.project,
+    title: `Task timer completed: ${task.title}`,
+    detail: `${Math.floor(Number(activeLog.duration || 0) / 60)} minutes were logged before completion.`,
+    tone: 'emerald',
+    link: `/projects/${task.project}`,
+    metadata: {
+      taskTitle: task.title,
+      duration: Number(activeLog.duration || 0),
+    },
+  });
 }
 
 async function canAccessTask(req, task) {
@@ -258,10 +373,12 @@ const listTasks = asyncHandler(async (req, res) => {
       .limit(limit),
   );
 
+  const serializedTasks = await serializeTasksWithRequests(tasks);
+
   return res.json({
     success: true,
     data: {
-      tasks: tasks.map(serializeTask),
+      tasks: serializedTasks,
       total,
       limit,
       hasMore: total > limit,
@@ -288,10 +405,12 @@ const getMyTasks = asyncHandler(async (req, res) => {
       .limit(limit),
   );
 
+  const serializedTasks = await serializeTasksWithRequests(tasks);
+
   return res.json({
     success: true,
     data: {
-      tasks: tasks.map(serializeTask),
+      tasks: serializedTasks,
       total,
       limit,
       hasMore: total > limit,
@@ -311,9 +430,11 @@ const getTaskById = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
 
+  const [serializedTask] = await serializeTasksWithRequests([task]);
+
   return res.json({
     success: true,
-    data: serializeTask(task),
+    data: serializedTask,
   });
 });
 
@@ -363,6 +484,9 @@ const createTask = asyncHandler(async (req, res) => {
       },
     });
   }
+  const [serializedTask] = await serializeTasksWithRequests([populated]);
+  emitToProject(populated.project?._id || populated.project, 'task:created', serializedTask);
+  emitToAll('task:created', serializedTask);
   await logActivity({
     actor: req.user?.id || null,
     action: 'task_created',
@@ -382,7 +506,7 @@ const createTask = asyncHandler(async (req, res) => {
   return res.status(201).json({
     success: true,
     message: 'Task created',
-    data: serializeTask(populated),
+    data: serializedTask,
   });
 });
 
@@ -401,6 +525,7 @@ const updateTask = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
 
+  const previousStatus = task.status;
   Object.assign(task, normalizeTaskInput(req.body, task));
   if (req.body.stage !== undefined) {
     const resolvedStage = await resolveStageForProject(task.project, req.body.stage);
@@ -409,11 +534,21 @@ const updateTask = asyncHandler(async (req, res) => {
     }
     task.stage = resolvedStage?._id || null;
   }
+  if (task.status === 'done' && previousStatus !== 'done') {
+    await finishBudgetedTimerForTask(task, req.user?.id || null);
+  }
+  if (task.status === 'done') {
+    task.timerStatus = 'completed';
+  } else if (task.estimatedDurationMinutes && task.timerStatus === 'completed') {
+    task.timerStatus = getEffectiveTimerStatus(task) === 'expired' ? 'expired' : 'not_started';
+  }
   await task.save();
 
   const populated = await populateTaskRelations(Task.findById(task._id));
 
-  emitToProject(populated.project?._id || populated.project, 'task:updated', serializeTask(populated));
+  const [serializedTask] = await serializeTasksWithRequests([populated]);
+  emitToProject(populated.project?._id || populated.project, 'task:updated', serializedTask);
+  emitToAll('task:updated', serializedTask);
   await logActivity({
     actor: req.user?.id || null,
     action: 'task_updated',
@@ -434,7 +569,7 @@ const updateTask = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     message: 'Task updated',
-    data: serializeTask(populated),
+    data: serializedTask,
   });
 });
 
@@ -445,6 +580,8 @@ const deleteTask = asyncHandler(async (req, res) => {
   }
 
   await task.deleteOne();
+  emitToProject(task.project, 'task:deleted', { id: String(task._id), projectId: String(task.project || '') });
+  emitToAll('task:deleted', { id: String(task._id), projectId: String(task.project || '') });
   await logActivity({
     actor: req.user?.id || null,
     action: 'task_deleted',
@@ -640,9 +777,186 @@ const addComment = asyncHandler(async (req, res) => {
   return res.status(201).json({
     success: true,
     message: 'Comment added',
-    data: serializeTask(populated),
+    data: (await serializeTasksWithRequests([populated]))[0],
   });
 });
+
+const createTimeExtensionRequest = asyncHandler(async (req, res) => {
+  const task = await Task.findById(req.params.id);
+  if (!task) {
+    return res.status(404).json({ success: false, message: 'Task not found' });
+  }
+
+  if (!(await canAccessTask(req, task))) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const reason = String(req.body.reason || '').trim();
+  const requestedMinutes = toPositiveMinutes(req.body.requestedMinutes, 0);
+  if (!reason) {
+    return res.status(400).json({ success: false, message: 'A valid reason is required' });
+  }
+  if (!requestedMinutes) {
+    return res.status(400).json({ success: false, message: 'Requested minutes must be greater than zero' });
+  }
+
+  const effectiveStatus = getEffectiveTimerStatus(task);
+  if (!task.estimatedDurationMinutes || effectiveStatus !== 'expired') {
+    return res.status(400).json({ success: false, message: 'Extra time can be requested only after the task timer expires' });
+  }
+
+  const existingPending = await TaskTimeExtensionRequest.findOne({
+    task: task._id,
+    employee: req.user.id,
+    status: 'pending',
+  });
+  if (existingPending) {
+    return res.status(409).json({ success: false, message: 'An extra-time request is already pending' });
+  }
+
+  task.timerStatus = 'expired';
+  await task.save();
+
+  const request = await TaskTimeExtensionRequest.create({
+    task: task._id,
+    employee: req.user.id,
+    requestedMinutes,
+    reason,
+  });
+
+  const approver = task.reporter || task.createdBy;
+  if (approver && String(approver) !== String(req.user.id)) {
+    await createNotification({
+      recipient: approver,
+      sender: req.user.id,
+      type: 'time_extension_requested',
+      title: 'Extra time requested',
+      message: `${task.title} needs ${requestedMinutes} more minutes`,
+      link: `/projects/${task.project}`,
+      metadata: {
+        taskId: task._id,
+        taskTitle: task.title,
+        projectId: task.project,
+      },
+    });
+  }
+
+  await logActivity({
+    actor: req.user.id,
+    action: 'time_extension_requested',
+    entityType: 'task',
+    entityId: task._id,
+    project: task.project,
+    title: `Extra time requested: ${task.title}`,
+    detail: reason,
+    tone: 'amber',
+    link: `/projects/${task.project}`,
+    metadata: {
+      taskTitle: task.title,
+      requestedMinutes,
+    },
+  });
+
+  return res.status(201).json({
+    success: true,
+    message: 'Extra-time request submitted',
+    data: serializeTimeExtensionRequest(await TaskTimeExtensionRequest.findById(request._id).populate('employee', 'name email role avatar employeeId')),
+  });
+});
+
+const listPendingTimeExtensionRequests = asyncHandler(async (req, res) => {
+  const query = { status: 'pending' };
+
+  const requests = await TaskTimeExtensionRequest.find(query)
+    .sort({ createdAt: -1 })
+    .populate('employee', 'name email role avatar employeeId')
+    .populate({
+      path: 'task',
+      select: 'title project reporter createdBy assignee timerExpiresAt timerStatus estimatedDurationMinutes',
+      populate: [
+        { path: 'project', select: 'projectName clientName' },
+        { path: 'reporter', select: 'name email role avatar employeeId' },
+        { path: 'createdBy', select: 'name email role avatar employeeId' },
+        { path: 'assignee', select: 'name email role avatar employeeId' },
+      ],
+    });
+
+  const visible = requests.filter((request) => {
+    const task = request.task || {};
+    return canApproveTimeExtension(req.user, task);
+  });
+
+  return res.json({
+    success: true,
+    data: visible.map(serializeTimeExtensionRequest),
+  });
+});
+
+async function decideTimeExtensionRequest(req, res, status) {
+  const request = await TaskTimeExtensionRequest.findById(req.params.requestId).populate('task');
+  if (!request) {
+    return res.status(404).json({ success: false, message: 'Extra-time request not found' });
+  }
+  if (request.status !== 'pending') {
+    return res.status(400).json({ success: false, message: 'Request has already been decided' });
+  }
+
+  const task = request.task;
+  if (!canApproveTimeExtension(req.user, task)) {
+    return res.status(403).json({ success: false, message: 'Only the task raiser or assigned owner can approve or reject this request' });
+  }
+
+  request.status = status;
+  request.decisionNote = String(req.body.decisionNote || '').trim();
+  request.decidedAt = new Date();
+  if (status === 'approved') {
+    request.approvedBy = req.user.id;
+    const grantedMinutes = toPositiveMinutes(req.body.grantedMinutes, request.requestedMinutes);
+    const baseTime = task.timerExpiresAt && new Date(task.timerExpiresAt).getTime() > Date.now()
+      ? new Date(task.timerExpiresAt).getTime()
+      : Date.now();
+    task.timerExpiresAt = new Date(baseTime + grantedMinutes * 60 * 1000);
+    task.extraTimeMinutesGranted = Number(task.extraTimeMinutesGranted || 0) + grantedMinutes;
+    task.timerStatus = 'extended';
+    await task.save();
+  } else {
+    request.rejectedBy = req.user.id;
+  }
+  await request.save();
+
+  await createNotification({
+    recipient: request.employee,
+    sender: req.user.id,
+    type: status === 'approved' ? 'time_extension_approved' : 'time_extension_rejected',
+    title: status === 'approved' ? 'Extra time approved' : 'Extra time rejected',
+    message: status === 'approved'
+      ? `${task.title} was extended by ${toPositiveMinutes(req.body.grantedMinutes, request.requestedMinutes)} minutes`
+      : `${task.title} extra-time request was rejected`,
+    link: '/my-tasks',
+    metadata: {
+      taskId: task._id,
+      taskTitle: task.title,
+      projectId: task.project,
+    },
+  });
+
+  emitToProject(task.project, 'task:time-extension', { taskId: task._id, requestId: request._id, status });
+  emitToAll('task:time-extension', { taskId: task._id, requestId: request._id, status });
+
+  return res.json({
+    success: true,
+    message: status === 'approved' ? 'Extra time approved' : 'Extra time rejected',
+    data: serializeTimeExtensionRequest(
+      await TaskTimeExtensionRequest.findById(request._id)
+        .populate('employee', 'name email role avatar employeeId')
+        .populate('approvedBy', 'name email role avatar employeeId')
+        .populate('rejectedBy', 'name email role avatar employeeId'),
+    ),
+  });
+}
+
+const approveTimeExtensionRequest = asyncHandler((req, res) => decideTimeExtensionRequest(req, res, 'approved'));
+const rejectTimeExtensionRequest = asyncHandler((req, res) => decideTimeExtensionRequest(req, res, 'rejected'));
 
 module.exports = {
   listTasks,
@@ -654,5 +968,10 @@ module.exports = {
   reorderTasks,
   addComment,
   getTaskCounts,
+  createTimeExtensionRequest,
+  listPendingTimeExtensionRequests,
+  approveTimeExtensionRequest,
+  rejectTimeExtensionRequest,
   serializeTask,
+  serializeTasksWithRequests,
 };

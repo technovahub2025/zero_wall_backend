@@ -9,6 +9,7 @@ const { sendEmail, inviteEmailTemplate } = require('../utils/sendEmail');
 const { createNotification } = require('../utils/createNotification');
 const { emitToUser } = require('../config/socket');
 const { getClientUrl } = require('../utils/env');
+const { serializeTasksWithRequests } = require('./task.controller');
 
 function serializeEmployee(user) {
   const item = user.toObject ? user.toObject({ virtuals: true }) : user;
@@ -21,6 +22,7 @@ function serializeEmployee(user) {
     avatarPublicId: item.avatarPublicId,
     isActive: item.isActive,
     phone: item.phone || '',
+    emergencyPhone: item.emergencyPhone || '',
     designation: item.designation || '',
     department: item.department || '',
     employeeId: item.employeeId,
@@ -36,6 +38,70 @@ function normalizeRole(role) {
   const allowed = ['admin', 'project_manager', 'employee'];
   if (!role) return 'employee';
   return allowed.includes(role) ? role : 'employee';
+}
+
+function normalizePhone(value) {
+  return String(value || '').replace(/[\s-]/g, '').trim();
+}
+
+function validateTenDigitPhone(value, label) {
+  const normalized = normalizePhone(value);
+  if (!/^\d{10}$/.test(normalized)) {
+    return `${label} must be exactly 10 digits`;
+  }
+  return '';
+}
+
+function validateRequiredEmployeeFields(body) {
+  const requiredFields = [
+    ['employeeId', 'Employee ID'],
+    ['name', 'Name'],
+    ['email', 'Email'],
+    ['phone', 'Mobile number'],
+    ['emergencyPhone', 'Emergency number'],
+    ['joiningDate', 'Joining date'],
+  ];
+
+  for (const [field, label] of requiredFields) {
+    if (!String(body[field] || '').trim()) {
+      return `${label} is required`;
+    }
+  }
+
+  const mobileError = validateTenDigitPhone(body.phone, 'Mobile number');
+  if (mobileError) return mobileError;
+
+  const emergencyError = validateTenDigitPhone(body.emergencyPhone, 'Emergency number');
+  if (emergencyError) return emergencyError;
+
+  const joiningDate = new Date(body.joiningDate);
+  if (Number.isNaN(joiningDate.getTime())) {
+    return 'Joining date is invalid';
+  }
+
+  return '';
+}
+
+async function findEmployeeIdConflict(employeeId, currentId = null) {
+  const normalizedEmployeeId = String(employeeId || '').trim();
+  if (!normalizedEmployeeId) return null;
+
+  const filter = { employeeId: normalizedEmployeeId };
+  if (currentId) {
+    filter._id = { $ne: currentId };
+  }
+  return User.findOne(filter).select('_id employeeId');
+}
+
+async function findEmailConflict(email, currentId = null) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  const filter = { email: normalizedEmail };
+  if (currentId) {
+    filter._id = { $ne: currentId };
+  }
+  return User.findOne(filter).select('_id email');
 }
 
 async function sendInviteIfRequested(user, req) {
@@ -77,6 +143,7 @@ const listEmployees = asyncHandler(async (req, res) => {
       { email: { $regex: search, $options: 'i' } },
       { designation: { $regex: search, $options: 'i' } },
       { employeeId: { $regex: search, $options: 'i' } },
+      { emergencyPhone: { $regex: search, $options: 'i' } },
     ];
   }
   if (department && department !== 'all') {
@@ -131,11 +198,13 @@ const getEmployee = asyncHandler(async (req, res) => {
 
   const logs = await TimerLog.find({ user: employee._id }).sort({ date: -1, startTime: -1 });
 
+  const serializedTasks = await serializeTasksWithRequests(tasks);
+
   return res.json({
     success: true,
     data: {
       ...serializeEmployee(employee),
-      tasks: tasks.map((task) => task.toObject({ virtuals: true })),
+      tasks: serializedTasks,
       projects: projects.map((project) => project.toObject({ virtuals: true })),
       totalLoggedSeconds: logs.reduce((sum, log) => sum + Number(log.duration || 0), 0),
     },
@@ -143,9 +212,10 @@ const getEmployee = asyncHandler(async (req, res) => {
 });
 
 const createEmployee = asyncHandler(async (req, res) => {
-  const { name, email, role, phone, designation, department, password, confirmPassword, sendInvite = false, joiningDate, avatar, isActive } = req.body;
-  if (!email) {
-    return res.status(400).json({ success: false, message: 'Email is required' });
+  const { employeeId, name, email, role, phone, emergencyPhone, designation, department, password, confirmPassword, sendInvite = false, joiningDate, avatar, isActive } = req.body;
+  const validationError = validateRequiredEmployeeFields(req.body);
+  if (validationError) {
+    return res.status(400).json({ success: false, message: validationError });
   }
 
   const existing = await User.findOne({ email: String(email).toLowerCase() });
@@ -153,13 +223,20 @@ const createEmployee = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: 'Employee already exists' });
   }
 
+  const employeeIdConflict = await findEmployeeIdConflict(employeeId, existing?._id);
+  if (employeeIdConflict) {
+    return res.status(409).json({ success: false, message: 'Employee ID already exists' });
+  }
+
   const employee = existing || new User({ email });
-  employee.name = name || employee.name || email.split('@')[0];
+  employee.employeeId = String(employeeId).trim();
+  employee.name = String(name).trim();
   employee.role = normalizeRole(role);
-  employee.phone = phone || employee.phone || '';
+  employee.phone = normalizePhone(phone);
+  employee.emergencyPhone = normalizePhone(emergencyPhone);
   employee.designation = designation || employee.designation || '';
   employee.department = department || employee.department || '';
-  employee.joiningDate = joiningDate ? new Date(joiningDate) : employee.joiningDate || new Date();
+  employee.joiningDate = new Date(joiningDate);
   employee.avatar = avatar ?? employee.avatar ?? '';
   employee.isActive = typeof isActive === 'boolean' ? isActive : !sendInvite;
   employee.createdBy = req.user?.id || employee.createdBy || null;
@@ -189,10 +266,41 @@ const updateEmployee = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Employee not found' });
   }
 
-  const fields = ['name', 'email', 'phone', 'designation', 'department', 'joiningDate', 'avatar', 'isActive'];
+  const strictFields = ['employeeId', 'name', 'email', 'phone', 'emergencyPhone', 'designation', 'department', 'joiningDate'];
+  const requiresStrictValidation = strictFields.some((field) => req.body[field] !== undefined);
+  if (requiresStrictValidation) {
+    const validationError = validateRequiredEmployeeFields({ ...employee.toObject(), ...req.body });
+    if (validationError) {
+      return res.status(400).json({ success: false, message: validationError });
+    }
+  }
+
+  if (req.body.employeeId !== undefined) {
+    const employeeIdConflict = await findEmployeeIdConflict(req.body.employeeId, employee._id);
+    if (employeeIdConflict) {
+      return res.status(409).json({ success: false, message: 'Employee ID already exists' });
+    }
+  }
+
+  if (req.body.email !== undefined) {
+    const emailConflict = await findEmailConflict(req.body.email, employee._id);
+    if (emailConflict) {
+      return res.status(409).json({ success: false, message: 'Email already exists' });
+    }
+  }
+
+  const fields = ['employeeId', 'name', 'email', 'phone', 'emergencyPhone', 'designation', 'department', 'joiningDate', 'avatar', 'isActive'];
   fields.forEach((field) => {
     if (req.body[field] !== undefined) {
-      employee[field] = field === 'joiningDate' && req.body[field] ? new Date(req.body[field]) : req.body[field];
+      if (field === 'joiningDate') {
+        employee[field] = new Date(req.body[field]);
+      } else if (field === 'phone' || field === 'emergencyPhone') {
+        employee[field] = normalizePhone(req.body[field]);
+      } else if (typeof req.body[field] === 'string') {
+        employee[field] = req.body[field].trim();
+      } else {
+        employee[field] = req.body[field];
+      }
     }
   });
 
@@ -280,11 +388,11 @@ const getEmployeeTasks = asyncHandler(async (req, res) => {
       },
     });
 
-  const grouped = tasks.reduce(
+  const serializedTasks = await serializeTasksWithRequests(tasks);
+  const grouped = serializedTasks.reduce(
     (acc, task) => {
-      const item = task.toObject({ virtuals: true });
-      acc[item.status] = acc[item.status] || [];
-      acc[item.status].push(item);
+      acc[task.status] = acc[task.status] || [];
+      acc[task.status].push(task);
       return acc;
     },
     { todo: [], 'in-progress': [], review: [], done: [] },
@@ -293,7 +401,7 @@ const getEmployeeTasks = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     data: {
-      tasks: tasks.map((task) => task.toObject({ virtuals: true })),
+      tasks: serializedTasks,
       grouped,
       counts: {
         todo: grouped.todo.length,

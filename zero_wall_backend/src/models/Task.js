@@ -54,6 +54,28 @@ const taskSchema = new mongoose.Schema(
     },
     dueDate: { type: Date, index: true },
     completedAt: { type: Date },
+    estimatedDurationMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    timerStartedAt: { type: Date },
+    timerExpiresAt: { type: Date, index: true },
+    timerStatus: {
+      type: String,
+      enum: ['not_started', 'running', 'expired', 'extended', 'completed'],
+      default: 'not_started',
+      index: true,
+    },
+    extraTimeMinutesGranted: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    activeTimerLog: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'TimerLog',
+    },
     nextAction: { type: String, trim: true, default: '' },
     tags: [{ type: String, trim: true }],
     attachments: [

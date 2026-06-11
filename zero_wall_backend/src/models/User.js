@@ -45,6 +45,12 @@ const userSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
+      trim: true,
+      default: '',
+    },
+    emergencyPhone: {
+      type: String,
+      trim: true,
       default: '',
     },
     designation: {
@@ -58,6 +64,7 @@ const userSchema = new mongoose.Schema(
     },
     employeeId: {
       type: String,
+      trim: true,
       unique: true,
       sparse: true,
     },

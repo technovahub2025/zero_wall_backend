@@ -13,6 +13,7 @@ function serializeProfile(user) {
     avatar: item.avatar,
     avatarPublicId: item.avatarPublicId,
     phone: item.phone || '',
+    emergencyPhone: item.emergencyPhone || '',
     designation: item.designation || '',
     department: item.department || '',
     employeeId: item.employeeId,
@@ -38,7 +39,7 @@ const updateMyProfile = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'User not found' });
   }
 
-  ['name', 'phone', 'designation', 'department', 'avatar', 'avatarPublicId', 'joiningDate'].forEach((field) => {
+  ['name', 'phone', 'emergencyPhone', 'designation', 'department', 'avatar', 'avatarPublicId', 'joiningDate'].forEach((field) => {
     if (req.body[field] !== undefined) {
       user[field] = field === 'joiningDate' && req.body[field] ? new Date(req.body[field]) : req.body[field];
     }

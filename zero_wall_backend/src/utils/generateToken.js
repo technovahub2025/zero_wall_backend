@@ -59,6 +59,7 @@ async function sendTokenResponse(user, statusCode, res) {
       designation: user.designation,
       department: user.department,
       phone: user.phone,
+      emergencyPhone: user.emergencyPhone,
     },
   });
 }

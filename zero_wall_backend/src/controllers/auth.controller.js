@@ -54,6 +54,7 @@ function publicUser(user) {
     designation: user.designation,
     department: user.department,
     phone: user.phone,
+    emergencyPhone: user.emergencyPhone,
     updatedAt: user.updatedAt,
   };
 }

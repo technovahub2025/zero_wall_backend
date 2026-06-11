@@ -70,8 +70,16 @@ const createRateLimit = (windowMs, max, message) =>
     message: { success: false, message },
   });
 
-const authRateLimit = createRateLimit(15 * 60 * 1000, 10, 'Too many auth attempts. Try again in 15 minutes.');
-const apiRateLimit = createRateLimit(15 * 60 * 1000, 200, 'Too many requests. Slow down.');
+const authRateLimit = createRateLimit(
+  15 * 60 * 1000,
+  process.env.NODE_ENV === 'production' ? 10 : 100,
+  'Too many auth attempts. Try again in 15 minutes.',
+);
+const apiRateLimit = createRateLimit(
+  15 * 60 * 1000,
+  process.env.NODE_ENV === 'production' ? 200 : 1000,
+  'Too many requests. Slow down.',
+);
 const uploadRateLimit = createRateLimit(60 * 60 * 1000, 50, 'Upload limit reached. Try again in an hour.');
 
 module.exports = {
