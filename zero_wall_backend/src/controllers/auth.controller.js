@@ -50,6 +50,7 @@ function publicUser(user) {
     email: user.email,
     role: user.role,
     avatar: user.avatar,
+    theme: user.theme || 'system',
     employeeId: user.employeeId,
     designation: user.designation,
     department: user.department,
@@ -69,10 +70,29 @@ function normalizeRole(role) {
 
 async function loadInviteUser(token) {
   const hashedToken = hashToken(token);
+  const now = new Date();
   return User.findOne({
-    inviteToken: hashedToken,
-    inviteExpiry: { $gt: new Date() },
-  }).populate('createdBy', 'name email role');
+    $or: [
+      {
+        inviteToken: hashedToken,
+        inviteExpiry: { $gt: now },
+      },
+      {
+        inviteTokenPrevious: hashedToken,
+        inviteExpiryPrevious: { $gt: now },
+      },
+      {
+        inviteTokenHistory: {
+          $elemMatch: {
+            token: hashedToken,
+            expiry: { $gt: now },
+          },
+        },
+      },
+    ],
+  })
+    .select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory')
+    .populate('createdBy', 'name email role');
 }
 
 async function loadResetUser(token) {
@@ -306,7 +326,8 @@ const inviteMember = asyncHandler(async (req, res) => {
   }
 
   const inviteRole = normalizeRole(role);
-  let user = await User.findOne({ email: String(email).toLowerCase() });
+  let user = await User.findOne({ email: String(email).toLowerCase() })
+    .select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
 
   if (user && user.isActive && user.passwordHash && !user.inviteToken) {
     return res.status(409).json({ success: false, message: 'User already exists' });
@@ -320,7 +341,6 @@ const inviteMember = asyncHandler(async (req, res) => {
       phone: phone || '',
       designation: designation || '',
       department: department || '',
-      isActive: false,
       createdBy: req.user?.id || null,
     });
   } else {
@@ -329,7 +349,6 @@ const inviteMember = asyncHandler(async (req, res) => {
     user.phone = phone ?? user.phone;
     user.designation = designation ?? user.designation;
     user.department = department ?? user.department;
-    user.isActive = false;
     user.createdBy = req.user?.id || user.createdBy;
   }
 
@@ -339,7 +358,7 @@ const inviteMember = asyncHandler(async (req, res) => {
   const inviteUrl = `${getClientUrl()}/invite/${inviteToken}`;
   await sendEmail({
     to: user.email,
-    subject: `${process.env.APP_NAME || 'ZEROWALL'} invitation`,
+    subject: `${process.env.APP_NAME || 'PG Infrastructure'} invitation for ${user.name}`,
     html: inviteEmailTemplate({
       inviteeName: user.name,
       inviterName: req.user?.name || 'A teammate',
@@ -409,6 +428,9 @@ const acceptInvite = asyncHandler(async (req, res) => {
   user.isActive = true;
   user.inviteToken = undefined;
   user.inviteExpiry = undefined;
+  user.inviteTokenPrevious = undefined;
+  user.inviteExpiryPrevious = undefined;
+  user.inviteTokenHistory = [];
   user.password = password;
   user.lastLogin = new Date();
   await user.save();

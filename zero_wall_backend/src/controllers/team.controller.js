@@ -9,6 +9,7 @@ const { createNotification } = require('../utils/createNotification');
 const { emitToUser } = require('../config/socket');
 const { sanitizeUser } = require('../utils/sanitize');
 const { getClientUrl } = require('../utils/env');
+const { getTokenExpiryMs } = require('../utils/tokenExpiry');
 
 const allowedRoles = ['employee', 'admin', 'project_manager'];
 
@@ -70,16 +71,13 @@ function serializeUser(user) {
 }
 
 async function buildInvite(user, inviter) {
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  user.inviteToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-  user.inviteExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
-  user.isActive = false;
+  const rawToken = user.generateInviteToken();
   await user.save();
 
   const inviteUrl = `${getClientUrl()}/invite/${rawToken}`;
   await sendEmail({
     to: user.email,
-    subject: `${process.env.APP_NAME || 'ZEROWALL'} invitation`,
+    subject: `${process.env.APP_NAME || 'PG Infrastructure'} invitation for ${user.name}`,
     html: inviteEmailTemplate({
       inviteeName: user.name,
       inviterName: inviter?.name || 'A teammate',
@@ -257,7 +255,8 @@ const inviteMember = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Email is required' });
   }
 
-  const existing = await User.findOne({ email: String(email).toLowerCase() });
+  const existing = await User.findOne({ email: String(email).toLowerCase() })
+    .select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   const user = existing || new User({ email });
   user.name = name || user.name || email.split('@')[0];
   user.role = allowedRoles.includes(role) ? role : 'employee';
@@ -297,7 +296,7 @@ const inviteMember = asyncHandler(async (req, res) => {
 });
 
 const resendInvite = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id);
+  const user = await User.findById(req.params.id).select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   if (!user) {
     return res.status(404).json({ success: false, message: 'Invite not found' });
   }
@@ -307,13 +306,16 @@ const resendInvite = asyncHandler(async (req, res) => {
 });
 
 const revokeInvite = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id);
+  const user = await User.findById(req.params.id).select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   if (!user) {
     return res.status(404).json({ success: false, message: 'Invite not found' });
   }
 
   user.inviteToken = undefined;
   user.inviteExpiry = undefined;
+  user.inviteTokenPrevious = undefined;
+  user.inviteExpiryPrevious = undefined;
+  user.inviteTokenHistory = [];
   user.isActive = false;
   await user.save();
   return res.json({ success: true, message: 'Invite revoked' });

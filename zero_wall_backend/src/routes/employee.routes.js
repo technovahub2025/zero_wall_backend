@@ -4,7 +4,7 @@ const validateRequest = require('../middleware/validateRequest');
 const { requireAuth, requireRole } = require('../middleware/auth.middleware');
 const {
   createEmployee,
-  deactivateEmployee,
+  deleteEmployee,
   getEmployee,
   getEmployeeTasks,
   getEmployeeWorkload,
@@ -34,7 +34,7 @@ router.post(
 router.get('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployee);
 router.put('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), updateEmployee);
 router.put('/:id/role', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), updateEmployeeRole);
-router.delete('/:id', requireAuth, requireRole('superadmin'), deactivateEmployee);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteEmployee);
 router.get('/:id/tasks', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployeeTasks);
 router.get('/:id/workload', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployeeWorkload);
 router.get('/:id/timesheets', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployeeTimesheets);

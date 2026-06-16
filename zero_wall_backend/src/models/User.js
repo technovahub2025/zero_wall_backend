@@ -1,6 +1,21 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { getTokenExpiryMs } = require('../utils/tokenExpiry');
+
+const inviteHistorySchema = new mongoose.Schema(
+  {
+    token: {
+      type: String,
+      required: true,
+    },
+    expiry: {
+      type: Date,
+      required: true,
+    },
+  },
+  { _id: false },
+);
 
 const userSchema = new mongoose.Schema(
   {
@@ -42,6 +57,11 @@ const userSchema = new mongoose.Schema(
     avatarPublicId: {
       type: String,
       default: '',
+    },
+    theme: {
+      type: String,
+      enum: ['light', 'dark', 'system'],
+      default: 'system',
     },
     phone: {
       type: String,
@@ -91,6 +111,19 @@ const userSchema = new mongoose.Schema(
       type: Date,
       select: false,
     },
+    inviteTokenPrevious: {
+      type: String,
+      select: false,
+    },
+    inviteExpiryPrevious: {
+      type: Date,
+      select: false,
+    },
+    inviteTokenHistory: {
+      type: [inviteHistorySchema],
+      default: [],
+      select: false,
+    },
     resetToken: {
       type: String,
       select: false,
@@ -136,15 +169,33 @@ userSchema.methods.matchPassword = function matchPassword(enteredPassword) {
 
 userSchema.methods.generateInviteToken = function generateInviteToken() {
   const rawToken = crypto.randomBytes(32).toString('hex');
+  const history = Array.isArray(this.inviteTokenHistory) ? this.inviteTokenHistory : [];
+  const nextHistory = [];
+
+  if (this.inviteToken && this.inviteExpiry) {
+    nextHistory.push({ token: this.inviteToken, expiry: this.inviteExpiry });
+  }
+
+  if (this.inviteTokenPrevious && this.inviteExpiryPrevious) {
+    nextHistory.push({ token: this.inviteTokenPrevious, expiry: this.inviteExpiryPrevious });
+  }
+
+  nextHistory.push(
+    ...history.filter((entry) => entry?.token && entry?.expiry),
+  );
+
+  this.inviteTokenHistory = nextHistory.slice(0, 5);
+  this.inviteTokenPrevious = this.inviteToken || undefined;
+  this.inviteExpiryPrevious = this.inviteExpiry || undefined;
   this.inviteToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-  this.inviteExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  this.inviteExpiry = new Date(Date.now() + getTokenExpiryMs('INVITE_TOKEN_EXPIRES_IN_HOURS', 48));
   return rawToken;
 };
 
 userSchema.methods.generateResetToken = function generateResetToken() {
   const rawToken = crypto.randomBytes(32).toString('hex');
   this.resetToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-  this.resetExpiry = new Date(Date.now() + 60 * 60 * 1000);
+  this.resetExpiry = new Date(Date.now() + getTokenExpiryMs('RESET_TOKEN_EXPIRES_IN_HOURS', 24));
   return rawToken;
 };
 

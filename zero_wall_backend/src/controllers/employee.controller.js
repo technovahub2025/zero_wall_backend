@@ -10,6 +10,7 @@ const { createNotification } = require('../utils/createNotification');
 const { emitToUser } = require('../config/socket');
 const { getClientUrl } = require('../utils/env');
 const { serializeTasksWithRequests } = require('./task.controller');
+const { getTokenExpiryMs } = require('../utils/tokenExpiry');
 
 function serializeEmployee(user) {
   const item = user.toObject ? user.toObject({ virtuals: true }) : user;
@@ -105,15 +106,13 @@ async function findEmailConflict(email, currentId = null) {
 }
 
 async function sendInviteIfRequested(user, req) {
-  const inviteToken = crypto.randomBytes(32).toString('hex');
-  user.inviteToken = crypto.createHash('sha256').update(inviteToken).digest('hex');
-  user.inviteExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  const inviteToken = user.generateInviteToken();
   await user.save();
 
   const inviteUrl = `${getClientUrl()}/invite/${inviteToken}`;
   await sendEmail({
     to: user.email,
-    subject: `${process.env.APP_NAME || 'ZEROWALL'} invitation`,
+    subject: `${process.env.APP_NAME || 'PG Infrastructure'} invitation for ${user.name}`,
     html: inviteEmailTemplate({
       inviteeName: user.name,
       inviterName: req.user?.name || 'A teammate',
@@ -218,9 +217,10 @@ const createEmployee = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: validationError });
   }
 
-  const existing = await User.findOne({ email: String(email).toLowerCase() });
+  const existing = await User.findOne({ email: String(email).toLowerCase() })
+    .select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   if (existing && existing.isActive && !sendInvite) {
-    return res.status(409).json({ success: false, message: 'Employee already exists' });
+    return res.status(409).json({ success: false, message: 'Email already exists' });
   }
 
   const employeeIdConflict = await findEmployeeIdConflict(employeeId, existing?._id);
@@ -261,7 +261,7 @@ const createEmployee = asyncHandler(async (req, res) => {
 });
 
 const updateEmployee = asyncHandler(async (req, res) => {
-  const employee = await User.findById(req.params.id);
+  const employee = await User.findById(req.params.id).select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   if (!employee) {
     return res.status(404).json({ success: false, message: 'Employee not found' });
   }
@@ -289,6 +289,19 @@ const updateEmployee = asyncHandler(async (req, res) => {
     }
   }
 
+  const sendInvite = Boolean(req.body.sendInvite);
+  const nextPassword = String(req.body.password || '').trim();
+  const nextConfirmPassword = String(req.body.confirmPassword || '').trim();
+  if (nextPassword) {
+    if (!nextConfirmPassword) {
+      return res.status(400).json({ success: false, message: 'Confirm password is required' });
+    }
+    if (nextPassword !== nextConfirmPassword) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match' });
+    }
+    employee.password = nextPassword;
+  }
+
   const fields = ['employeeId', 'name', 'email', 'phone', 'emergencyPhone', 'designation', 'department', 'joiningDate', 'avatar', 'isActive'];
   fields.forEach((field) => {
     if (req.body[field] !== undefined) {
@@ -306,15 +319,19 @@ const updateEmployee = asyncHandler(async (req, res) => {
 
   await employee.save();
 
+  if (sendInvite) {
+    await sendInviteIfRequested(employee, req);
+  }
+
   return res.json({
     success: true,
-    message: 'Employee updated',
+    message: sendInvite ? 'Invite sent' : 'Employee updated',
     data: serializeEmployee(employee),
   });
 });
 
 const updateEmployeeRole = asyncHandler(async (req, res) => {
-  const employee = await User.findById(req.params.id);
+  const employee = await User.findById(req.params.id).select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   if (!employee) {
     return res.status(404).json({ success: false, message: 'Employee not found' });
   }
@@ -345,19 +362,19 @@ const updateEmployeeRole = asyncHandler(async (req, res) => {
   });
 });
 
-const deactivateEmployee = asyncHandler(async (req, res) => {
+const deleteEmployee = asyncHandler(async (req, res) => {
   const employee = await User.findById(req.params.id);
   if (!employee) {
     return res.status(404).json({ success: false, message: 'Employee not found' });
   }
 
-  employee.isActive = false;
-  await employee.save();
+  const data = serializeEmployee(employee);
+  await employee.deleteOne();
 
   return res.json({
     success: true,
-    message: 'Employee deactivated',
-    data: serializeEmployee(employee),
+    message: 'Employee deleted',
+    data,
   });
 });
 
@@ -509,7 +526,7 @@ module.exports = {
   createEmployee,
   updateEmployee,
   updateEmployeeRole,
-  deactivateEmployee,
+  deleteEmployee,
   getEmployeeTasks,
   getEmployeeWorkload,
   getEmployeeTimesheets,

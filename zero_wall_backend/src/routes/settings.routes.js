@@ -24,7 +24,13 @@ router.put(
   changePassword,
 );
 router.get('/theme', requireAuth, getThemeSettings);
-router.put('/theme', requireAuth, updateThemeSettings);
+router.put(
+  '/theme',
+  requireAuth,
+  body('theme').isIn(['light', 'dark', 'system']),
+  validateRequest,
+  updateThemeSettings,
+);
 router.get('/org', requireAuth, requireRole('superadmin'), getOrganizationSettings);
 
 module.exports = router;

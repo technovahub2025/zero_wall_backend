@@ -90,17 +90,19 @@ const getClient = asyncHandler(async (req, res) => {
 });
 
 const createClient = asyncHandler(async (req, res) => {
-  if (!req.body.clientName) {
+  const clientName = String(req.body.clientName || '').trim();
+
+  if (!clientName) {
     return res.status(400).json({ success: false, message: 'Client name is required' });
   }
 
-  const existing = await findClientByName(req.body.clientName);
+  const existing = await findClientByName(clientName);
   if (existing) {
     return res.status(409).json({ success: false, message: 'Client already exists' });
   }
 
   const client = await Client.create({
-    ...normalizeClientInput(req.body),
+    ...normalizeClientInput({ ...req.body, clientName }),
     createdBy: req.user?.id || null,
   });
 
@@ -128,8 +130,16 @@ const updateClient = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Client not found' });
   }
 
+  const nextClientName = String(req.body.clientName || client.clientName || '').trim();
+  if (nextClientName) {
+    const existing = await findClientByName(nextClientName);
+    if (existing && String(existing._id) !== String(client._id)) {
+      return res.status(409).json({ success: false, message: 'Client already exists' });
+    }
+  }
+
   const previousName = client.clientName;
-  Object.assign(client, normalizeClientInput(req.body, client));
+  Object.assign(client, normalizeClientInput({ ...req.body, clientName: nextClientName }, client));
   client.updatedBy = req.user?.id || client.updatedBy || null;
   await client.save();
 

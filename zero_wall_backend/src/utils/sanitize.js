@@ -5,6 +5,9 @@ const sanitizeUser = (user) => {
   delete obj.passwordHash;
   delete obj.inviteToken;
   delete obj.inviteExpiry;
+  delete obj.inviteTokenPrevious;
+  delete obj.inviteExpiryPrevious;
+  delete obj.inviteTokenHistory;
   delete obj.resetToken;
   delete obj.resetExpiry;
   return obj;

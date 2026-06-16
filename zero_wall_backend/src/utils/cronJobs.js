@@ -21,8 +21,8 @@ function weeklySummaryTemplate({ adminName, activeProjects, overdueTaskCount, pr
 
   return `
     <div style="background:#0B1929;padding:40px;font-family:sans-serif;color:#F0F4FA">
-      <h1 style="color:#2E83F5;font-size:24px">ZEROWALL</h1>
-      <p style="color:#8FA8C8;font-size:13px;margin-bottom:24px">Built for those who never miss.</p>
+      <h1 style="color:#2E83F5;font-size:24px">PG Infrastructure</h1>
+      <p style="color:#8FA8C8;font-size:13px;margin-bottom:24px">Project execution and reporting.</p>
       <h2 style="color:#F0F4FA;font-size:18px">Weekly Summary</h2>
       <p style="color:#8FA8C8">Hi ${adminName}, here's your week in review.</p>
       <div style="display:flex;gap:16px;margin:20px 0">
@@ -96,7 +96,7 @@ async function sendWeeklySummaries() {
   for (const admin of admins) {
     await sendEmail({
       to: admin.email,
-      subject: 'ZEROWALL - Weekly Project Summary',
+      subject: 'PG Infrastructure - Weekly Project Summary',
       html: weeklySummaryTemplate({
         adminName: admin.name,
         activeProjects: projects.length,
@@ -108,14 +108,13 @@ async function sendWeeklySummaries() {
 }
 
 async function cleanupExpiredInvites() {
-  const result = await User.deleteMany({
-    isActive: false,
+  const expiredCount = await User.countDocuments({
     inviteExpiry: { $lt: new Date() },
-    inviteToken: { $exists: true },
+    inviteToken: { $exists: true, $ne: null },
   });
 
-  if (result.deletedCount > 0) {
-    console.log(`Cleaned ${result.deletedCount} expired invites`);
+  if (expiredCount > 0) {
+    console.log(`Expired invites found: ${expiredCount} (cleanup disabled; manual handling only)`);
   }
 }
 

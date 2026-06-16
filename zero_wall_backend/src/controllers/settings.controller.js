@@ -12,6 +12,7 @@ function serializeProfile(user) {
     role: item.role,
     avatar: item.avatar,
     avatarPublicId: item.avatarPublicId,
+    theme: item.theme || 'system',
     phone: item.phone || '',
     emergencyPhone: item.emergencyPhone || '',
     designation: item.designation || '',
@@ -72,20 +73,34 @@ const changePassword = asyncHandler(async (req, res) => {
 });
 
 const getThemeSettings = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
   return res.json({
     success: true,
     data: {
-      theme: 'system',
+      theme: user.theme || 'system',
     },
   });
 });
 
 const updateThemeSettings = asyncHandler(async (req, res) => {
+  const theme = ['light', 'dark', 'system'].includes(req.body.theme) ? req.body.theme : 'system';
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  user.theme = theme;
+  await user.save();
+
   return res.json({
     success: true,
     message: 'Theme updated',
     data: {
-      theme: req.body.theme || 'system',
+      theme: user.theme,
     },
   });
 });
