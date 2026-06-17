@@ -11,7 +11,16 @@ const { sanitizeUser } = require('../utils/sanitize');
 const { getClientUrl } = require('../utils/env');
 const { getTokenExpiryMs } = require('../utils/tokenExpiry');
 
-const allowedRoles = ['employee', 'admin', 'project_manager'];
+function normalizeRole(role) {
+  const allowed = ['superadmin', 'employee', 'admin', 'project_manager'];
+  if (!role) return 'employee';
+  return allowed.includes(role) ? role : 'employee';
+}
+
+function canAssignRole(actorRole, nextRole) {
+  if (nextRole !== 'superadmin') return true;
+  return actorRole === 'superadmin';
+}
 
 const listTeam = asyncHandler(async (req, res) => {
   const team = await TeamMember.find().sort({ name: 1 });
@@ -259,7 +268,10 @@ const inviteMember = asyncHandler(async (req, res) => {
     .select('+inviteToken +inviteExpiry +inviteTokenPrevious +inviteExpiryPrevious +inviteTokenHistory');
   const user = existing || new User({ email });
   user.name = name || user.name || email.split('@')[0];
-  user.role = allowedRoles.includes(role) ? role : 'employee';
+  if (!canAssignRole(req.user?.role, role)) {
+    return res.status(403).json({ success: false, message: 'Only superadmin can invite a superadmin' });
+  }
+  user.role = normalizeRole(role);
   user.phone = phone;
   user.designation = designation;
   user.department = department;
@@ -327,7 +339,10 @@ const changeMemberRole = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Member not found' });
   }
 
-  user.role = allowedRoles.includes(req.body.role) ? req.body.role : 'employee';
+  if (!canAssignRole(req.user?.role, req.body.role)) {
+    return res.status(403).json({ success: false, message: 'Only superadmin can assign the superadmin role' });
+  }
+  user.role = normalizeRole(req.body.role);
   await user.save();
 
   emitToUser(String(user._id), 'role:changed', { role: user.role });

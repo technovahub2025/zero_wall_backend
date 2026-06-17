@@ -36,9 +36,14 @@ function serializeEmployee(user) {
 }
 
 function normalizeRole(role) {
-  const allowed = ['admin', 'project_manager', 'employee'];
+  const allowed = ['superadmin', 'admin', 'project_manager', 'employee'];
   if (!role) return 'employee';
   return allowed.includes(role) ? role : 'employee';
+}
+
+function canAssignRole(actorRole, nextRole) {
+  if (nextRole !== 'superadmin') return true;
+  return actorRole === 'superadmin';
 }
 
 function normalizePhone(value) {
@@ -231,6 +236,9 @@ const createEmployee = asyncHandler(async (req, res) => {
   const employee = existing || new User({ email });
   employee.employeeId = String(employeeId).trim();
   employee.name = String(name).trim();
+  if (!canAssignRole(req.user?.role, role)) {
+    return res.status(403).json({ success: false, message: 'Only superadmin can create a superadmin account' });
+  }
   employee.role = normalizeRole(role);
   employee.phone = normalizePhone(phone);
   employee.emergencyPhone = normalizePhone(emergencyPhone);
@@ -290,6 +298,9 @@ const updateEmployee = asyncHandler(async (req, res) => {
   }
 
   const sendInvite = Boolean(req.body.sendInvite);
+  if (req.body.role !== undefined && !canAssignRole(req.user?.role, req.body.role)) {
+    return res.status(403).json({ success: false, message: 'Only superadmin can assign the superadmin role' });
+  }
   const nextPassword = String(req.body.password || '').trim();
   const nextConfirmPassword = String(req.body.confirmPassword || '').trim();
   if (nextPassword) {
