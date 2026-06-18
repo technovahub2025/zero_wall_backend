@@ -30,6 +30,9 @@ router.post(
   requireRole('superadmin', 'admin', 'project_manager'),
   body('title').notEmpty().trim(),
   body('project').notEmpty().trim(),
+  body('assignee').notEmpty().withMessage('Assignee is required'),
+  body('startDate').notEmpty().withMessage('Start date is required').isISO8601({ strict: false }),
+  body('dueDate').notEmpty().withMessage('Due date is required').isISO8601({ strict: false }),
   validateRequest,
   createTask,
 );

@@ -52,7 +52,7 @@ const taskSchema = new mongoose.Schema(
       default: 'todo',
       index: true,
     },
-    dueDate: { type: Date, index: true },
+    dueDate: { type: Date, required: [true, 'Due date is required'], index: true },
     completedAt: { type: Date },
     estimatedDurationMinutes: {
       type: Number,

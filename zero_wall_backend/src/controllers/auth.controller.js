@@ -43,6 +43,14 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+function normalizeLoginIdentifier(value = '') {
+  return String(value || '').trim();
+}
+
+function normalizePhoneValue(value = '') {
+  return String(value || '').replace(/\D/g, '');
+}
+
 function publicUser(user) {
   return {
     id: user._id,
@@ -135,16 +143,34 @@ const register = asyncHandler(async (req, res) => {
 });
 
 const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { identifier, email, password } = req.body;
+  const loginValue = normalizeLoginIdentifier(identifier || email);
 
-  if (!email || !password) {
+  if (!loginValue || !password) {
     return res.status(400).json({
       success: false,
-      message: 'Email and password are required',
+      message: 'Email or mobile number and password are required',
     });
   }
 
-  const user = await User.findOne({ email: String(email).toLowerCase() }).select('+passwordHash');
+  const normalizedEmail = loginValue.toLowerCase();
+  const normalizedPhone = normalizePhoneValue(loginValue);
+
+  const query = [
+    { email: normalizedEmail },
+  ];
+
+  if (normalizedPhone) {
+    query.push({ phone: loginValue });
+    query.push({ phone: normalizedPhone });
+  }
+
+  const candidates = await User.find({ $or: query }).select('+passwordHash');
+  const user = candidates.find((item) => {
+    const phoneMatch = normalizedPhone && normalizePhoneValue(item.phone) === normalizedPhone;
+    const emailMatch = String(item.email || '').toLowerCase() === normalizedEmail;
+    return emailMatch || phoneMatch;
+  });
 
   if (!user || !user.passwordHash) {
     return res.status(401).json({
