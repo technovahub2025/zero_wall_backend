@@ -60,10 +60,11 @@ const taskSchema = new mongoose.Schema(
       min: 0,
     },
     timerStartedAt: { type: Date },
+    timerPausedAt: { type: Date },
     timerExpiresAt: { type: Date, index: true },
     timerStatus: {
       type: String,
-      enum: ['not_started', 'running', 'expired', 'extended', 'completed'],
+      enum: ['not_started', 'running', 'paused', 'expired', 'extended', 'completed'],
       default: 'not_started',
       index: true,
     },
@@ -73,6 +74,10 @@ const taskSchema = new mongoose.Schema(
       min: 0,
     },
     activeTimerLog: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'TimerLog',
+    },
+    lastPausedTimerLog: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'TimerLog',
     },

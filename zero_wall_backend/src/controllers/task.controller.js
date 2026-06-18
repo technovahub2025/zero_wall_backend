@@ -21,6 +21,12 @@ function serializeTask(task) {
   const assignedTeam = doc.assignedTeam || [];
   const teamMembers = Array.isArray(team?.members) ? team.members : [];
   const timerStatus = getEffectiveTimerStatus(doc);
+  const timerBudgetSeconds = (Number(doc.estimatedDurationMinutes || 0) + Number(doc.extraTimeMinutesGranted || 0)) * 60;
+  const timerRemainingSeconds = timerStatus === 'paused'
+    ? Math.max(0, Math.floor(timerBudgetSeconds - Number(doc.totalTimeLogged || 0)))
+    : doc.timerExpiresAt && ['running', 'extended'].includes(timerStatus)
+      ? Math.max(0, Math.floor((new Date(doc.timerExpiresAt).getTime() - Date.now()) / 1000))
+      : Math.max(0, Math.floor(timerBudgetSeconds - Number(doc.totalTimeLogged || 0)));
   return {
     id: doc._id,
     title: doc.title,
@@ -41,10 +47,13 @@ function serializeTask(task) {
     completedAt: doc.completedAt,
     estimatedDurationMinutes: Number(doc.estimatedDurationMinutes || 0),
     timerStartedAt: doc.timerStartedAt,
+    timerPausedAt: doc.timerPausedAt,
     timerExpiresAt: doc.timerExpiresAt,
     timerStatus,
     extraTimeMinutesGranted: Number(doc.extraTimeMinutesGranted || 0),
     activeTimerLog: doc.activeTimerLog,
+    timerBudgetSeconds,
+    timerRemainingSeconds,
     pendingTimeExtensionRequest: doc.pendingTimeExtensionRequest || null,
     latestTimeExtensionRequest: doc.latestTimeExtensionRequest || null,
     nextAction: doc.nextAction,
@@ -320,6 +329,7 @@ async function finishBudgetedTimerForTask(task, userId = null) {
   await activeLog.save();
   task.totalTimeLogged = Number(task.totalTimeLogged || 0) + Number(activeLog.duration || 0);
   task.activeTimerLog = undefined;
+  task.timerPausedAt = undefined;
   task.timerStatus = 'completed';
 
   await logActivity({
@@ -539,6 +549,7 @@ const updateTask = asyncHandler(async (req, res) => {
   }
   if (task.status === 'done') {
     task.timerStatus = 'completed';
+    task.timerPausedAt = undefined;
   } else if (task.estimatedDurationMinutes && task.timerStatus === 'completed') {
     task.timerStatus = getEffectiveTimerStatus(task) === 'expired' ? 'expired' : 'not_started';
   }

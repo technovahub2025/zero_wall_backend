@@ -2,6 +2,7 @@
 const Task = require('../models/Task');
 const Project = require('../models/Project');
 const TimesheetFilter = require('../models/TimesheetFilter');
+const mongoose = require('mongoose');
 const asyncHandler = require('../utils/asyncHandler');
 const { logActivity } = require('../utils/logActivity');
 const { serializeTimerLog } = require('./timer.controller');
@@ -55,7 +56,7 @@ async function buildTimesheetFilter(query = {}, targetUserId) {
     const regex = new RegExp(escapeRegex(search), 'i');
     const matchedTasks = await Task.find({ title: regex }).select('_id').lean();
     searchTaskIds = matchedTasks.map((task) => String(task._id));
-    const searchClauses = [{ note: regex }];
+    const searchClauses = [{ note: regex }, { switchReason: regex }];
     if (searchTaskIds.length) {
       searchClauses.push({ task: { $in: searchTaskIds } });
     }
@@ -305,7 +306,7 @@ function calculateChange(currentSeconds, previousSeconds) {
 }
 
 function buildCsv(rows = []) {
-  const header = ['Date', 'Start Time', 'End Time', 'Project', 'Task', 'Note', 'Duration', 'Billable', 'Manual'];
+  const header = ['Date', 'Start Time', 'End Time', 'Project', 'Task', 'Action', 'Reason / Comment', 'Duration', 'Billable', 'Manual'];
   const lines = [header.join(',')];
   rows.forEach((row) => {
     const values = [
@@ -314,7 +315,8 @@ function buildCsv(rows = []) {
       row.endTime,
       row.project,
       row.task,
-      row.note,
+      row.action,
+      row.reason,
       row.duration,
       row.billable,
       row.manual,
@@ -513,7 +515,12 @@ function canMutateOtherUsers(req, targetUserId) {
   return String(req.user.id) === String(targetUserId) || ['superadmin', 'admin', 'project_manager'].includes(req.user.role);
 }
 
-async function bulkUpdateTimesheets(req, res, targetUserId = req.params?.id || req.user.id) {
+function validObjectIds(ids = []) {
+  return ids.filter((id) => mongoose.isValidObjectId(id));
+}
+
+async function bulkUpdateTimesheets(req, res) {
+  const targetUserId = req.params?.id || req.user.id;
   if (!canMutateOtherUsers(req, targetUserId)) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
@@ -521,6 +528,10 @@ async function bulkUpdateTimesheets(req, res, targetUserId = req.params?.id || r
   const ids = normalizeIdList(req.body.ids || req.body.logIds || req.body.selectedIds);
   if (!ids.length) {
     return res.status(400).json({ success: false, message: 'No logs selected' });
+  }
+  const validIds = validObjectIds(ids);
+  if (!validIds.length) {
+    return res.status(400).json({ success: false, message: 'No valid logs selected' });
   }
 
   const updates = {};
@@ -532,7 +543,7 @@ async function bulkUpdateTimesheets(req, res, targetUserId = req.params?.id || r
     return res.status(400).json({ success: false, message: 'No valid update provided' });
   }
 
-  const logs = await TimerLog.find({ _id: { $in: ids }, user: targetUserId }).lean();
+  const logs = await TimerLog.find({ _id: { $in: validIds }, user: targetUserId }).lean();
   if (!logs.length) {
     return res.status(404).json({ success: false, message: 'Logs not found' });
   }
@@ -540,28 +551,33 @@ async function bulkUpdateTimesheets(req, res, targetUserId = req.params?.id || r
   const previous = logs.map((log) => ({ id: String(log._id), isBillable: Boolean(log.isBillable), duration: Number(log.duration || 0) }));
   await TimerLog.updateMany({ _id: { $in: logs.map((log) => log._id) } }, { $set: updates });
 
-  await logActivity({
-    actor: req.user.id,
-    action: 'timesheet_bulk_update',
-    entityType: 'timer',
-    entityId: ids.join(','),
-    project: null,
-    title: 'Timesheet bulk update',
-    detail: `Updated ${logs.length} timesheet log${logs.length === 1 ? '' : 's'}`,
-    tone: 'sky',
-    link: String(targetUserId) === String(req.user.id) ? '/my-timesheets' : `/employees/${targetUserId}`,
-    metadata: {
-      targetUserId: String(targetUserId),
-      ids,
-      previous,
-      updates,
-    },
-  });
+  try {
+    await logActivity({
+      actor: req.user.id,
+      action: 'timesheet_bulk_update',
+      entityType: 'timer',
+      entityId: validIds.join(','),
+      project: null,
+      title: 'Timesheet bulk update',
+      detail: `Updated ${logs.length} timesheet log${logs.length === 1 ? '' : 's'}`,
+      tone: 'sky',
+      link: String(targetUserId) === String(req.user.id) ? '/my-timesheets' : `/employees/${targetUserId}`,
+      metadata: {
+        targetUserId: String(targetUserId),
+        ids: validIds,
+        previous,
+        updates,
+      },
+    });
+  } catch (error) {
+    console.warn('Failed to write timesheet bulk update activity:', error.message);
+  }
 
-  return res.json({ success: true, message: 'Timesheets updated', data: { ids, updates } });
+  return res.json({ success: true, message: 'Timesheets updated', data: { ids: validIds, updates } });
 }
 
-async function bulkDeleteTimesheets(req, res, targetUserId = req.params?.id || req.user.id) {
+async function bulkDeleteTimesheets(req, res) {
+  const targetUserId = req.params?.id || req.user.id;
   if (!canMutateOtherUsers(req, targetUserId)) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
@@ -570,8 +586,12 @@ async function bulkDeleteTimesheets(req, res, targetUserId = req.params?.id || r
   if (!ids.length) {
     return res.status(400).json({ success: false, message: 'No logs selected' });
   }
+  const validIds = validObjectIds(ids);
+  if (!validIds.length) {
+    return res.status(400).json({ success: false, message: 'No valid logs selected' });
+  }
 
-  const logs = await TimerLog.find({ _id: { $in: ids }, user: targetUserId }).lean();
+  const logs = await TimerLog.find({ _id: { $in: validIds }, user: targetUserId }).lean();
   if (!logs.length) {
     return res.status(404).json({ success: false, message: 'Logs not found' });
   }
@@ -581,26 +601,30 @@ async function bulkDeleteTimesheets(req, res, targetUserId = req.params?.id || r
     return res.status(400).json({ success: false, message: 'Active timers cannot be deleted' });
   }
 
-  await TimerLog.deleteMany({ _id: { $in: ids }, user: targetUserId });
+  await TimerLog.deleteMany({ _id: { $in: validIds }, user: targetUserId });
 
-  await logActivity({
-    actor: req.user.id,
-    action: 'timesheet_bulk_delete',
-    entityType: 'timer',
-    entityId: ids.join(','),
-    project: null,
-    title: 'Timesheet bulk delete',
-    detail: `Deleted ${logs.length} timesheet log${logs.length === 1 ? '' : 's'}`,
-    tone: 'rose',
-    link: String(targetUserId) === String(req.user.id) ? '/my-timesheets' : `/employees/${targetUserId}`,
-    metadata: {
-      targetUserId: String(targetUserId),
-      ids,
-      previous: logs.map((log) => ({ id: String(log._id), duration: Number(log.duration || 0), isBillable: Boolean(log.isBillable) })),
-    },
-  });
+  try {
+    await logActivity({
+      actor: req.user.id,
+      action: 'timesheet_bulk_delete',
+      entityType: 'timer',
+      entityId: validIds.join(','),
+      project: null,
+      title: 'Timesheet bulk delete',
+      detail: `Deleted ${logs.length} timesheet log${logs.length === 1 ? '' : 's'}`,
+      tone: 'rose',
+      link: String(targetUserId) === String(req.user.id) ? '/my-timesheets' : `/employees/${targetUserId}`,
+      metadata: {
+        targetUserId: String(targetUserId),
+        ids: validIds,
+        previous: logs.map((log) => ({ id: String(log._id), duration: Number(log.duration || 0), isBillable: Boolean(log.isBillable) })),
+      },
+    });
+  } catch (error) {
+    console.warn('Failed to write timesheet bulk delete activity:', error.message);
+  }
 
-  return res.json({ success: true, message: 'Timesheets deleted', data: { ids } });
+  return res.json({ success: true, message: 'Timesheets deleted', data: { ids: validIds } });
 }
 
 function buildSelectedRows(logs = []) {
@@ -610,14 +634,16 @@ function buildSelectedRows(logs = []) {
     endTime: log.endTime ? new Date(log.endTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '',
     project: log.projectName || log.project?.projectName || '',
     task: log.taskTitle || log.task?.title || '',
-    note: log.note || '',
+    action: log.actionLabel || '',
+    reason: log.reason || log.switchReason || log.note || '',
     duration: formatDurationSeconds(log.duration || 0),
     billable: log.isBillable ? 'Yes' : 'No',
     manual: log.isManual ? 'Yes' : 'No',
   }));
 }
 
-async function exportTimesheets(req, res, targetUserId = req.params?.id || req.user.id) {
+async function exportTimesheets(req, res) {
+  const targetUserId = req.params?.id || req.user.id;
   if (!canMutateOtherUsers(req, targetUserId) && String(req.user.id) !== String(targetUserId)) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }

@@ -29,6 +29,9 @@ const TimerLogSchema = new mongoose.Schema(
     endTime: {
       type: Date,
     },
+    pausedAt: {
+      type: Date,
+    },
     duration: {
       type: Number,
       default: 0,
@@ -60,6 +63,24 @@ const TimerLogSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
       index: true,
+    },
+    switchReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+    switchFromLog: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'TimerLog',
+    },
+    switchFromTask: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Task',
+    },
+    switchToTask: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Task',
     },
   },
   { timestamps: true },

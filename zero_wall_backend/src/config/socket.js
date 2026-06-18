@@ -2,6 +2,47 @@ const { Server } = require('socket.io');
 const { getClientUrl } = require('../utils/env');
 
 let io = null;
+const presenceByUserId = new Map();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function getPresenceSnapshot() {
+  return [...presenceByUserId.entries()].map(([userId, record]) => ({
+    userId,
+    connectedAt: record.connectedAt,
+    socketCount: record.socketCount,
+  }));
+}
+
+function markUserOnline(userId) {
+  if (!userId) return null;
+  const key = String(userId);
+  const existing = presenceByUserId.get(key) || { connectedAt: nowIso(), socketCount: 0 };
+  existing.socketCount += 1;
+  if (existing.socketCount === 1) {
+    existing.connectedAt = nowIso();
+  }
+  presenceByUserId.set(key, existing);
+  return { userId: key, connectedAt: existing.connectedAt, socketCount: existing.socketCount };
+}
+
+function markUserOffline(userId) {
+  if (!userId) return null;
+  const key = String(userId);
+  const existing = presenceByUserId.get(key);
+  if (!existing) return null;
+
+  existing.socketCount = Math.max(0, existing.socketCount - 1);
+  if (existing.socketCount <= 0) {
+    presenceByUserId.delete(key);
+    return { userId: key, connectedAt: existing.connectedAt, socketCount: 0 };
+  }
+
+  presenceByUserId.set(key, existing);
+  return { userId: key, connectedAt: existing.connectedAt, socketCount: existing.socketCount };
+}
 
 function initSocket(httpServer) {
   if (io) return io;
@@ -23,11 +64,27 @@ function initSocket(httpServer) {
     });
 
     socket.on('join:user', (userId) => {
-      if (userId) socket.join(`user:${userId}`);
+      if (!userId) return;
+      const key = String(userId);
+      if (socket.data.joinedUserId === key) return;
+      socket.join(`user:${key}`);
+      socket.data.joinedUserId = key;
+      const presence = markUserOnline(userId);
+      if (presence) {
+        emitToAdmin('monitor:presence:changed', presence);
+      }
     });
 
     socket.on('leave:user', (userId) => {
-      if (userId) socket.leave(`user:${userId}`);
+      if (!userId) return;
+      const key = String(userId);
+      if (socket.data.joinedUserId !== key) return;
+      socket.leave(`user:${key}`);
+      socket.data.joinedUserId = null;
+      const presence = markUserOffline(key);
+      if (presence) {
+        emitToAdmin('monitor:presence:changed', presence);
+      }
     });
 
     socket.on('join:project', (projectId) => {
@@ -40,6 +97,16 @@ function initSocket(httpServer) {
 
     socket.on('join:admin', () => {
       socket.join('admin');
+    });
+
+    socket.on('disconnect', () => {
+      const joinedUserId = socket.data.joinedUserId;
+      if (!joinedUserId) return;
+      socket.data.joinedUserId = null;
+      const presence = markUserOffline(joinedUserId);
+      if (presence) {
+        emitToAdmin('monitor:presence:changed', presence);
+      }
     });
   });
 
@@ -78,4 +145,5 @@ module.exports = {
   emitToProject,
   emitToAdmin,
   emitToAll,
+  getPresenceSnapshot,
 };

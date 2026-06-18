@@ -313,6 +313,19 @@ function stringifyArray(value = []) {
     .join(', ');
 }
 
+function getTimerLogAction(log = {}) {
+  if (log.isManual) return { action: 'manual', actionLabel: 'Manual entry' };
+  if (log.switchFromLog) return { action: 'switched_to', actionLabel: 'Switched to task' };
+  if (log.switchToTask) return { action: 'switched_from', actionLabel: 'Switched from task' };
+  if (log.pausedAt) return { action: 'paused', actionLabel: 'Paused' };
+  if (log.endTime) return { action: 'stopped', actionLabel: 'Stopped' };
+  return { action: 'started', actionLabel: 'Started' };
+}
+
+function getTimerLogReason(log = {}) {
+  return String(log.switchReason || log.note || '').trim();
+}
+
 function summarizeTaskProgress(tasks = []) {
   const now = Date.now();
   return tasks.reduce(
@@ -456,7 +469,7 @@ async function loadScopedReportData(query = {}) {
       )
       .lean(),
     TimerLog.find(timerMatch)
-      .select('_id user task project stage startTime endTime duration note date isManual isActive createdAt updatedAt')
+      .select('_id user task project stage startTime endTime pausedAt duration note switchReason switchFromLog switchFromTask switchToTask date isManual isActive createdAt updatedAt')
       .lean(),
     User.find({ role: { $in: ['admin', 'project_manager', 'employee'] }, isActive: true })
       .select('_id name email role avatar employeeId phone emergencyPhone designation department joiningDate isActive createdAt updatedAt')
@@ -719,22 +732,30 @@ function buildBundleFromData(data, query = {}, previousOverview = null) {
     updatedAt: stringifyDate(invoice.updatedAt),
   }));
 
-  const rawTimerLogs = (data.logs || []).map((log) => ({
-    id: String(log._id || ''),
-    user: stringifyEntity(log.user),
-    task: stringifyEntity(log.task),
-    project: stringifyEntity(log.project),
-    stage: stringifyEntity(log.stage),
-    startTime: stringifyDate(log.startTime),
-    endTime: stringifyDate(log.endTime),
-    durationSeconds: Number(log.duration || 0),
-    note: log.note || '',
-    date: stringifyDate(log.date),
-    isManual: Boolean(log.isManual),
-    isActive: Boolean(log.isActive),
-    createdAt: stringifyDate(log.createdAt),
-    updatedAt: stringifyDate(log.updatedAt),
-  }));
+  const rawTimerLogs = (data.logs || []).map((log) => {
+    const actionMeta = getTimerLogAction(log);
+    return {
+      id: String(log._id || ''),
+      user: stringifyEntity(log.user),
+      task: stringifyEntity(log.task),
+      project: stringifyEntity(log.project),
+      stage: stringifyEntity(log.stage),
+      startTime: stringifyDate(log.startTime),
+      endTime: stringifyDate(log.endTime),
+      pausedAt: stringifyDate(log.pausedAt),
+      durationSeconds: Number(log.duration || 0),
+      action: actionMeta.action,
+      actionLabel: actionMeta.actionLabel,
+      reason: getTimerLogReason(log),
+      note: log.note || '',
+      switchReason: log.switchReason || '',
+      date: stringifyDate(log.date),
+      isManual: Boolean(log.isManual),
+      isActive: Boolean(log.isActive),
+      createdAt: stringifyDate(log.createdAt),
+      updatedAt: stringifyDate(log.updatedAt),
+    };
+  });
 
   const rawEmployees = (data.employees || []).map((employee) => ({
     id: String(employee._id || ''),

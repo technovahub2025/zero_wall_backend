@@ -3,13 +3,28 @@ const TimerLog = require('../models/TimerLog');
 const Task = require('../models/Task');
 const Project = require('../models/Project');
 const Stage = require('../models/Stage');
+const Team = require('../models/Team');
 const TaskTimeExtensionRequest = require('../models/TaskTimeExtensionRequest');
 const { emitToAll } = require('../config/socket');
 const { logActivity } = require('../utils/logActivity');
 const { defaultBillableFromProject } = require('../utils/timesheet');
 
+function getTimerLogAction(log = {}) {
+  if (log.isManual) return { action: 'manual', actionLabel: 'Manual entry' };
+  if (log.switchFromLog) return { action: 'switched_to', actionLabel: 'Switched to task' };
+  if (log.switchToTask) return { action: 'switched_from', actionLabel: 'Switched from task' };
+  if (log.pausedAt) return { action: 'paused', actionLabel: 'Paused' };
+  if (log.endTime) return { action: 'stopped', actionLabel: 'Stopped' };
+  return { action: 'started', actionLabel: 'Started' };
+}
+
+function getTimerLogReason(log = {}) {
+  return String(log.switchReason || log.note || '').trim();
+}
+
 function serializeTimerLog(log) {
   const item = log.toObject ? log.toObject({ virtuals: true }) : log;
+  const actionMeta = getTimerLogAction(item);
   return {
     id: item._id,
     user: item.user,
@@ -18,8 +33,15 @@ function serializeTimerLog(log) {
     stage: item.stage,
     startTime: item.startTime,
     endTime: item.endTime,
+    pausedAt: item.pausedAt,
     duration: item.duration || 0,
     note: item.note || '',
+    reason: getTimerLogReason(item),
+    ...actionMeta,
+    switchReason: item.switchReason || '',
+    switchFromLog: item.switchFromLog,
+    switchFromTask: item.switchFromTask,
+    switchToTask: item.switchToTask,
     date: item.date,
     isManual: item.isManual,
     isBillable: item.isBillable,
@@ -34,13 +56,30 @@ async function addDurationToTask(taskId, durationSeconds) {
   await Task.updateOne({ _id: taskId }, { $inc: { totalTimeLogged: durationSeconds } });
 }
 
-function getEffectiveTimerStatus(task) {
+function getTaskBudgetSeconds(task) {
+  const estimated = (Number(task?.estimatedDurationMinutes || 0) + Number(task?.extraTimeMinutesGranted || 0)) * 60;
+  return Math.max(0, Math.floor(estimated));
+}
+
+function getTaskRemainingBudgetSeconds(task) {
+  const budgetSeconds = getTaskBudgetSeconds(task);
+  if (!budgetSeconds) return 0;
+  const loggedSeconds = Math.max(0, Number(task?.totalTimeLogged || 0));
+  return Math.max(0, budgetSeconds - loggedSeconds);
+}
+
+function buildTimerStatus(task) {
   const rawStatus = task.timerStatus || 'not_started';
   if (task.status === 'done' || rawStatus === 'completed') return 'completed';
+  if (rawStatus === 'paused') return 'paused';
   if (task.timerExpiresAt && ['running', 'extended'].includes(rawStatus) && new Date(task.timerExpiresAt).getTime() <= Date.now()) {
     return 'expired';
   }
   return rawStatus;
+}
+
+function getEffectiveTimerStatus(task) {
+  return buildTimerStatus(task);
 }
 
 async function isBudgetedTimerLocked(log) {
@@ -55,6 +94,58 @@ async function subtractDurationFromTask(taskId, durationSeconds) {
     { _id: taskId },
     { $inc: { totalTimeLogged: -Math.abs(durationSeconds) } },
   );
+}
+
+function serializePausedTask(task) {
+  const doc = task.toObject ? task.toObject({ virtuals: true }) : task;
+  const timerStatus = buildTimerStatus(doc);
+  const remainingSeconds = timerStatus === 'paused'
+    ? getTaskRemainingBudgetSeconds(doc)
+    : timerStatus === 'running' || timerStatus === 'extended'
+      ? Math.max(0, Math.floor((new Date(doc.timerExpiresAt).getTime() - Date.now()) / 1000))
+      : getTaskRemainingBudgetSeconds(doc);
+
+  return {
+    id: doc._id,
+    title: doc.title,
+    project: doc.project,
+    stage: doc.stage,
+    assignee: doc.assignee,
+    timerStartedAt: doc.timerStartedAt,
+    timerPausedAt: doc.timerPausedAt,
+    timerExpiresAt: doc.timerExpiresAt,
+    timerStatus,
+    estimatedDurationMinutes: Number(doc.estimatedDurationMinutes || 0),
+    totalTimeLogged: Number(doc.totalTimeLogged || 0),
+    remainingSeconds,
+    projectName: doc.project?.projectName || '',
+    stageName: doc.stage?.stageName || '',
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+async function getPausedTasksForUser(userId) {
+  const teamIds = await Team.find({ members: userId }).select('_id');
+  const filter = {
+    timerStatus: 'paused',
+    status: { $ne: 'done' },
+    $or: [
+      { assignee: userId },
+      { reporter: userId },
+      { createdBy: userId },
+      { assignedTeam: userId },
+      ...(teamIds.length ? [{ team: { $in: teamIds.map((team) => team._id) } }] : []),
+    ],
+  };
+
+  const tasks = await Task.find(filter)
+    .sort({ timerPausedAt: -1, updatedAt: -1 })
+    .populate('project', 'projectName clientName overallStatus')
+    .populate('stage', 'stageName stageNo')
+    .populate('assignee', 'name email role avatar employeeId');
+
+  return tasks.map(serializePausedTask);
 }
 
 function normalizeDateOnly(value) {
@@ -87,6 +178,65 @@ function buildDailySummary(logs) {
   return Object.entries(summary)
     .map(([date, duration]) => ({ date, duration }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function populateTimerLogById(logId) {
+  return TimerLog.findById(logId)
+    .populate('task', 'title status project stage totalTimeLogged estimatedDurationMinutes timerStartedAt timerExpiresAt timerPausedAt timerStatus extraTimeMinutesGranted activeTimerLog')
+    .populate('project', 'projectName clientName currentStage overallStatus')
+    .populate('stage', 'stageName stageNo')
+    .populate('user', 'name avatar role employeeId');
+}
+
+async function pauseActiveTimer(active, { reason = '', switchToTask = null } = {}) {
+  if (!active) return null;
+
+  active.endTime = new Date();
+  active.pausedAt = active.endTime;
+  active.isActive = false;
+  active.note = reason || active.note || '';
+  active.switchReason = reason || active.switchReason || '';
+  if (switchToTask) {
+    active.switchToTask = switchToTask;
+  }
+  await active.save();
+
+  const sourceTask = active.task ? await Task.findById(active.task) : null;
+  if (sourceTask) {
+    sourceTask.totalTimeLogged = Number(sourceTask.totalTimeLogged || 0) + Number(active.duration || 0);
+    sourceTask.timerPausedAt = active.endTime;
+    sourceTask.timerStatus = Number(sourceTask.estimatedDurationMinutes || 0) > 0 ? 'paused' : 'not_started';
+    sourceTask.activeTimerLog = undefined;
+    sourceTask.lastPausedTimerLog = active._id;
+    sourceTask.timerExpiresAt = undefined;
+    await sourceTask.save();
+  }
+
+  return active;
+}
+
+async function stopActiveTimer(active, { reason = '' } = {}) {
+  if (!active) return null;
+
+  active.endTime = new Date();
+  active.isActive = false;
+  active.note = reason || active.note || '';
+  await active.save();
+
+  const sourceTask = active.task ? await Task.findById(active.task) : null;
+  if (sourceTask) {
+    sourceTask.totalTimeLogged = Number(sourceTask.totalTimeLogged || 0) + Number(active.duration || 0);
+    sourceTask.timerPausedAt = undefined;
+    sourceTask.timerStatus = sourceTask.status === 'done' ? 'completed' : 'not_started';
+    sourceTask.activeTimerLog = undefined;
+    sourceTask.lastPausedTimerLog = undefined;
+    sourceTask.timerExpiresAt = undefined;
+    await sourceTask.save();
+  } else {
+    await addDurationToTask(active.task, active.duration);
+  }
+
+  return active;
 }
 
 const startTimer = asyncHandler(async (req, res) => {
@@ -122,25 +272,31 @@ const startTimer = asyncHandler(async (req, res) => {
 
   const active = await TimerLog.findOne({ user: req.user.id, isActive: true }).sort({ createdAt: -1 });
   if (active) {
+    if (taskId && String(active.task || '') === String(taskId)) {
+      const populatedActive = await populateTimerLogById(active._id);
+      return res.json({
+        success: true,
+        message: 'Timer already running',
+        data: serializeTimerLog(populatedActive),
+      });
+    }
     if (await isBudgetedTimerLocked(active)) {
-      if (taskId && String(active.task || '') === String(taskId)) {
-        const populatedActive = await TimerLog.findById(active._id)
-          .populate('task', 'title status project stage totalTimeLogged estimatedDurationMinutes timerStartedAt timerExpiresAt timerStatus extraTimeMinutesGranted activeTimerLog')
-          .populate('project', 'projectName clientName currentStage overallStatus')
-          .populate('stage', 'stageName stageNo')
-          .populate('user', 'name avatar role employeeId');
-        return res.json({
-          success: true,
-          message: 'Timer already running',
-          data: serializeTimerLog(populatedActive),
-        });
-      }
-      return res.status(409).json({ success: false, message: 'Complete the active budgeted task before switching timers' });
+      return res.status(409).json({ success: false, message: 'Use Switch to pause the current task before starting another one' });
     }
     active.endTime = new Date();
     active.isActive = false;
     await active.save();
     await addDurationToTask(active.task, active.duration);
+  }
+
+  const effectiveStatus = task ? getEffectiveTimerStatus(task) : 'not_started';
+  const remainingSeconds = task ? getTaskRemainingBudgetSeconds(task) : 0;
+  if (task && Number(task.estimatedDurationMinutes || 0) > 0 && remainingSeconds <= 0 && effectiveStatus !== 'paused') {
+    const pending = await TaskTimeExtensionRequest.exists({ task: task._id, employee: req.user.id, status: 'pending' });
+    return res.status(400).json({
+      success: false,
+      message: pending ? 'Extra-time request is pending approval' : 'Task timer expired. Request extra time to continue.',
+    });
   }
 
   const log = await TimerLog.create({
@@ -159,18 +315,16 @@ const startTimer = asyncHandler(async (req, res) => {
   if (task?.estimatedDurationMinutes) {
     if (!task.timerStartedAt) {
       task.timerStartedAt = log.startTime;
-      task.timerExpiresAt = new Date(log.startTime.getTime() + Number(task.estimatedDurationMinutes || 0) * 60 * 1000);
     }
-    task.timerStatus = getEffectiveTimerStatus(task) === 'expired' ? 'expired' : task.extraTimeMinutesGranted ? 'extended' : 'running';
+    task.timerPausedAt = undefined;
+    task.timerExpiresAt = new Date(log.startTime.getTime() + remainingSeconds * 1000);
+    task.timerStatus = task.extraTimeMinutesGranted ? 'extended' : 'running';
     task.activeTimerLog = log._id;
+    task.lastPausedTimerLog = undefined;
     await task.save();
   }
 
-  const populated = await TimerLog.findById(log._id)
-    .populate('task', 'title status project stage totalTimeLogged estimatedDurationMinutes timerStartedAt timerExpiresAt timerStatus extraTimeMinutesGranted activeTimerLog')
-    .populate('project', 'projectName clientName currentStage overallStatus')
-    .populate('stage', 'stageName stageNo')
-    .populate('user', 'name avatar role employeeId');
+  const populated = await populateTimerLogById(log._id);
 
   const serializedLog = serializeTimerLog(populated);
   emitToAll('timer:started', serializedLog);
@@ -182,21 +336,189 @@ const startTimer = asyncHandler(async (req, res) => {
   });
 });
 
+const switchTimer = asyncHandler(async (req, res) => {
+  const { taskId, projectId, stageId, note = '' } = req.body;
+  const switchReason = String(note || '').trim();
+
+  if (!taskId || !projectId) {
+    return res.status(400).json({ success: false, message: 'Task and project are required' });
+  }
+  if (!switchReason) {
+    return res.status(400).json({ success: false, message: 'A switch reason is required before pausing the current task' });
+  }
+
+  const project = await Project.findById(projectId);
+  if (!project) {
+    return res.status(404).json({ success: false, message: 'Project not found' });
+  }
+
+  const task = await Task.findById(taskId);
+  if (!task) {
+    return res.status(404).json({ success: false, message: 'Task not found' });
+  }
+
+  if (stageId) {
+    const stage = await Stage.findById(stageId);
+    if (!stage) {
+      return res.status(404).json({ success: false, message: 'Stage not found' });
+    }
+  }
+
+  if (getEffectiveTimerStatus(task) === 'expired') {
+    const pending = await TaskTimeExtensionRequest.exists({ task: task._id, employee: req.user.id, status: 'pending' });
+    return res.status(400).json({
+      success: false,
+      message: pending ? 'Extra-time request is pending approval' : 'Task timer expired. Request extra time to continue.',
+    });
+  }
+
+  const active = await TimerLog.findOne({ user: req.user.id, isActive: true }).sort({ createdAt: -1 });
+  if (active && String(active.task || '') === String(taskId)) {
+    const populatedActive = await populateTimerLogById(active._id);
+    return res.json({
+      success: true,
+      message: 'Timer already running',
+      data: serializeTimerLog(populatedActive),
+    });
+  }
+
+  if (active) {
+    await pauseActiveTimer(active, { reason: switchReason, switchToTask: taskId });
+    emitToAll('timer:stopped', serializeTimerLog(await populateTimerLogById(active._id)));
+  }
+
+  const log = await TimerLog.create({
+    user: req.user.id,
+    task: taskId,
+    project: projectId,
+    stage: stageId || task.stage || undefined,
+    startTime: new Date(),
+    note,
+    date: normalizeDateOnly(),
+    isManual: false,
+    isBillable: defaultBillableFromProject(project),
+    isActive: true,
+    resumedFromLog: active?._id || undefined,
+    switchFromLog: active?._id || undefined,
+    switchReason,
+  });
+
+  const remainingSeconds = getTaskRemainingBudgetSeconds(task);
+  if (Number(task.estimatedDurationMinutes || 0) > 0) {
+    if (!task.timerStartedAt) {
+      task.timerStartedAt = log.startTime;
+    }
+    task.timerPausedAt = undefined;
+    task.timerExpiresAt = new Date(log.startTime.getTime() + remainingSeconds * 1000);
+    task.timerStatus = task.extraTimeMinutesGranted ? 'extended' : 'running';
+    task.activeTimerLog = log._id;
+    task.lastPausedTimerLog = undefined;
+    await task.save();
+  }
+
+  const populated = await populateTimerLogById(log._id);
+  const serializedLog = serializeTimerLog(populated);
+  emitToAll('timer:started', serializedLog);
+
+  return res.status(201).json({
+    success: true,
+    message: active ? 'Timer switched' : 'Timer started',
+    data: serializedLog,
+  });
+});
+
+const resumeTimer = asyncHandler(async (req, res) => {
+  const { taskId, projectId, stageId, note = '' } = req.body;
+
+  if (!taskId) {
+    return res.status(400).json({ success: false, message: 'Task is required' });
+  }
+
+  const task = await Task.findById(taskId);
+  if (!task) {
+    return res.status(404).json({ success: false, message: 'Task not found' });
+  }
+
+  if (getEffectiveTimerStatus(task) !== 'paused') {
+    return res.status(409).json({ success: false, message: 'Task is not paused' });
+  }
+
+  const active = await TimerLog.findOne({ user: req.user.id, isActive: true }).sort({ createdAt: -1 });
+  if (active) {
+    return res.status(409).json({ success: false, message: 'Stop the current timer before resuming a paused task' });
+  }
+
+  const project = projectId ? await Project.findById(projectId) : await Project.findById(task.project);
+  if (!project) {
+    return res.status(404).json({ success: false, message: 'Project not found' });
+  }
+
+  if (stageId) {
+    const stage = await Stage.findById(stageId);
+    if (!stage) {
+      return res.status(404).json({ success: false, message: 'Stage not found' });
+    }
+  }
+
+  const remainingSeconds = getTaskRemainingBudgetSeconds(task);
+  if (remainingSeconds <= 0 && Number(task.estimatedDurationMinutes || 0) > 0) {
+    const pending = await TaskTimeExtensionRequest.exists({ task: task._id, employee: req.user.id, status: 'pending' });
+    return res.status(400).json({
+      success: false,
+      message: pending ? 'Extra-time request is pending approval' : 'Task timer expired. Request extra time to continue.',
+    });
+  }
+
+  const log = await TimerLog.create({
+    user: req.user.id,
+    task: taskId,
+    project: project._id,
+    stage: stageId || task.stage || undefined,
+    startTime: new Date(),
+    note,
+    date: normalizeDateOnly(),
+    isManual: false,
+    isBillable: defaultBillableFromProject(project),
+    isActive: true,
+    resumedFromLog: task.lastPausedTimerLog || undefined,
+  });
+
+  if (Number(task.estimatedDurationMinutes || 0) > 0) {
+    if (!task.timerStartedAt) {
+      task.timerStartedAt = log.startTime;
+    }
+    task.timerPausedAt = undefined;
+    task.timerExpiresAt = new Date(log.startTime.getTime() + remainingSeconds * 1000);
+    task.timerStatus = task.extraTimeMinutesGranted ? 'extended' : 'running';
+    task.activeTimerLog = log._id;
+    task.lastPausedTimerLog = undefined;
+    await task.save();
+  }
+
+  const populated = await populateTimerLogById(log._id);
+  const serializedLog = serializeTimerLog(populated);
+  emitToAll('timer:started', serializedLog);
+
+  return res.status(201).json({
+    success: true,
+    message: 'Timer resumed',
+    data: serializedLog,
+  });
+});
+
 const stopTimer = asyncHandler(async (req, res) => {
+  const reason = String(req.body?.reason || req.body?.note || '').trim();
+  if (!reason) {
+    return res.status(400).json({ success: false, message: 'A stop reason is required' });
+  }
+
   const active = await TimerLog.findOne({ user: req.user.id, isActive: true }).sort({ createdAt: -1 });
 
   if (!active) {
     return res.status(404).json({ success: false, message: 'No active timer found' });
   }
 
-  if (await isBudgetedTimerLocked(active)) {
-    return res.status(409).json({ success: false, message: 'Budgeted task timers cannot be stopped manually. Complete the task to end the timer.' });
-  }
-
-  active.endTime = new Date();
-  active.isActive = false;
-  await active.save();
-  await addDurationToTask(active.task, active.duration);
+  await stopActiveTimer(active, { reason });
 
   if (Number(active.duration || 0) >= 1800) {
     await logActivity({
@@ -233,16 +555,42 @@ const stopTimer = asyncHandler(async (req, res) => {
   });
 });
 
+const pauseTimer = asyncHandler(async (req, res) => {
+  const reason = String(req.body?.reason || req.body?.note || '').trim();
+  if (!reason) {
+    return res.status(400).json({ success: false, message: 'A pause reason is required' });
+  }
+
+  const active = await TimerLog.findOne({ user: req.user.id, isActive: true }).sort({ createdAt: -1 });
+  if (!active) {
+    return res.status(404).json({ success: false, message: 'No active timer found' });
+  }
+
+  await pauseActiveTimer(active, { reason });
+
+  const populated = await populateTimerLogById(active._id);
+  const serializedLog = serializeTimerLog(populated);
+  emitToAll('timer:stopped', serializedLog);
+
+  return res.json({
+    success: true,
+    message: 'Timer paused',
+    data: serializedLog,
+  });
+});
+
 const getActiveTimer = asyncHandler(async (req, res) => {
   const active = await TimerLog.findOne({ user: req.user.id, isActive: true })
     .sort({ createdAt: -1 })
-    .populate('task', 'title status project stage totalTimeLogged estimatedDurationMinutes timerStartedAt timerExpiresAt timerStatus extraTimeMinutesGranted activeTimerLog')
+    .populate('task', 'title status project stage totalTimeLogged estimatedDurationMinutes timerStartedAt timerExpiresAt timerPausedAt timerStatus extraTimeMinutesGranted activeTimerLog')
     .populate('project', 'projectName clientName currentStage overallStatus')
     .populate('stage', 'stageName stageNo')
     .populate('user', 'name avatar role employeeId');
 
+  const pausedTasks = await getPausedTasksForUser(req.user.id);
+
   if (!active) {
-    return res.json({ success: true, data: null });
+    return res.json({ success: true, data: { activeLog: null, pausedTasks } });
   }
 
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(active.startTime).getTime()) / 1000));
@@ -253,15 +601,20 @@ const getActiveTimer = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     data: {
-      ...serializeTimerLog(active),
+      activeLog: {
+        ...serializeTimerLog(active),
+        elapsedSeconds,
+        remainingSeconds,
+      },
       elapsedSeconds,
       remainingSeconds,
+      pausedTasks,
     },
   });
 });
 
 const getMyLogs = asyncHandler(async (req, res) => {
-  const { start, end, project, groupByDate } = req.query;
+  const { start, end, project, task, taskId, groupByDate } = req.query;
   const filter = { user: req.user.id };
   if (start || end) {
     filter.date = {};
@@ -269,6 +622,7 @@ const getMyLogs = asyncHandler(async (req, res) => {
     if (end) filter.date.$lte = normalizeDateOnly(end);
   }
   if (project) filter.project = project;
+  if (task || taskId) filter.task = task || taskId;
 
   const logs = await TimerLog.find(filter)
     .sort({ date: -1, startTime: -1 })
@@ -373,6 +727,9 @@ const deleteTimerLog = asyncHandler(async (req, res) => {
 
 module.exports = {
   startTimer,
+  switchTimer,
+  resumeTimer,
+  pauseTimer,
   stopTimer,
   getActiveTimer,
   getMyLogs,
