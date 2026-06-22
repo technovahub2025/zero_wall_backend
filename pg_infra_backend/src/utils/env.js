@@ -1,4 +1,5 @@
 const DEFAULT_CLIENT_URL = 'http://localhost:5173';
+const PRODUCTION_CLIENT_URL = 'https://technovahub.in';
 
 function normalizeOrigin(value) {
   const normalized = String(value || '').trim().replace(/[.,/]+$/, '');
@@ -15,10 +16,12 @@ function getClientUrls() {
     .filter(Boolean)
     .flatMap((value) => String(value).split(','));
 
-  const urls = rawValues.map(normalizeOrigin).filter(Boolean);
+  const urls = [...rawValues.map(normalizeOrigin), PRODUCTION_CLIENT_URL]
+    .map(normalizeOrigin)
+    .filter(Boolean);
   if (urls.length > 0) return [...new Set(urls)];
 
-  return [DEFAULT_CLIENT_URL];
+  return [DEFAULT_CLIENT_URL, PRODUCTION_CLIENT_URL];
 }
 
 function getClientUrl() {
