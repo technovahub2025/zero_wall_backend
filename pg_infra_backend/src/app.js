@@ -41,17 +41,28 @@ const {
   jsonSizeLimit,
   cacheControl,
 } = require('./middleware/performanceMiddleware');
-const { getClientUrl } = require('./utils/env');
+const { getClientUrls } = require('./utils/env');
 
 const app = express();
 app.disable('x-powered-by');
 
+const allowedOrigins = getClientUrls();
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
+  credentials: true,
+};
+
 app.use(
-  cors({
-    origin: getClientUrl(),
-    credentials: true,
-  }),
+  cors(corsOptions),
 );
+app.options(/.*/, cors(corsOptions));
 app.use(helmet());
 app.use(compression());
 app.use(express.json({ limit: '20mb' }));

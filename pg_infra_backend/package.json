@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "dev:full": "concurrently \"npm run dev --prefix ../zero_wall_frontend\" \"nodemon src/server.js\""
+    "dev:full": "concurrently \"npm run dev --prefix ../pg_infra_frontend\" \"nodemon src/server.js\""
   },
   "keywords": [],
   "author": "",

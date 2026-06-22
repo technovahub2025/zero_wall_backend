@@ -1,5 +1,5 @@
 const { Server } = require('socket.io');
-const { getClientUrl } = require('../utils/env');
+const { getClientUrls } = require('../utils/env');
 
 let io = null;
 const presenceByUserId = new Map();
@@ -47,9 +47,17 @@ function markUserOffline(userId) {
 function initSocket(httpServer) {
   if (io) return io;
 
+  const allowedOrigins = getClientUrls();
   io = new Server(httpServer, {
     cors: {
-      origin: getClientUrl(),
+      origin(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+          callback(null, true);
+          return;
+        }
+
+        callback(new Error(`Origin ${origin} is not allowed by Socket.IO CORS`));
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     },

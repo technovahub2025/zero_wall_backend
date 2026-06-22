@@ -27,7 +27,10 @@ function normalizeFilterValue(value) {
 }
 
 function buildBasicFilter(query = {}, targetUserId) {
-  const filter = { user: targetUserId };
+  const filter = {};
+  if (targetUserId) {
+    filter.user = targetUserId;
+  }
 
   const project = normalizeFilterValue(query.project);
   if (project) filter.project = project;
@@ -445,6 +448,15 @@ const getMyTimesheets = asyncHandler(async (req, res) => getTimesheets(req, res,
 
 const getEmployeeTimesheets = asyncHandler(async (req, res) => getTimesheets(req, res, req.params.id));
 
+const getAllTimesheets = asyncHandler(async (req, res) => {
+  if (!['superadmin', 'admin', 'project_manager'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  const data = await loadTimesheetContext({ targetUserId: null, query: req.query });
+  return res.json({ success: true, data: { ...data } });
+});
+
 const listTimesheetFilters = asyncHandler(async (req, res) => {
   const scope = String(req.query.scope || 'mine').trim() === 'employee' ? 'employee' : 'mine';
   const filters = await TimesheetFilter.find({ user: req.user.id, scope }).sort({ updatedAt: -1 }).lean();
@@ -679,6 +691,7 @@ module.exports = {
   createTimesheetFilter,
   deleteTimesheetFilter,
   exportTimesheets,
+  getAllTimesheets,
   getEmployeeTimesheets,
   getMyTimesheets,
   listTimesheetFilters,

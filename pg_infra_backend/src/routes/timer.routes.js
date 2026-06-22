@@ -16,6 +16,7 @@ const {
   bulkDeleteTimesheets,
   bulkUpdateTimesheets,
   exportTimesheets,
+  getAllTimesheets,
   getMyTimesheets,
 } = require('../controllers/timesheet.controller');
 
@@ -23,6 +24,7 @@ const router = express.Router();
 
 router.get('/active', requireAuth, getActiveTimer);
 router.get('/logs/mine', requireAuth, getMyTimesheets);
+router.get('/logs/all', requireAuth, getAllTimesheets);
 router.get('/logs/export', requireAuth, exportTimesheets);
 router.post(
   '/start',

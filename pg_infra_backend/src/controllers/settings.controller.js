@@ -113,7 +113,7 @@ const getOrganizationSettings = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     data: {
-      name: process.env.APP_NAME || 'ZEROWALL',
+      name: process.env.APP_NAME || 'pg_infra',
       email: process.env.EMAIL_FROM || process.env.SMTP_USER || '',
       clientUrl: getClientUrl(),
     },

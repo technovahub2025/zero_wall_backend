@@ -87,7 +87,7 @@ const uploadAvatar = asyncHandler(async (req, res) => {
   }
 
   const result = await uploadToCloudinary(req.file.buffer, {
-    folder: 'zerowall/avatars',
+    folder: 'pg_infra/avatars',
     public_id: `avatar_${user._id}`,
     overwrite: true,
     resource_type: 'image',
@@ -113,10 +113,10 @@ const uploadDocument = asyncHandler(async (req, res) => {
 
   const { projectId, stageId, employeeId, category = 'other' } = req.body;
   const folder = projectId
-    ? `zerowall/projects/${projectId}`
+    ? `pg_infra/projects/${projectId}`
     : employeeId
-      ? `zerowall/employees/${employeeId}`
-      : 'zerowall/general';
+      ? `pg_infra/employees/${employeeId}`
+      : 'pg_infra/general';
 
   if (projectId) {
     const project = await Project.findById(projectId);
@@ -213,10 +213,10 @@ const updateDocument = asyncHandler(async (req, res) => {
 
   if (req.file) {
     const folder = document.project
-      ? `zerowall/projects/${document.project}`
+      ? `pg_infra/projects/${document.project}`
       : document.employee
-        ? `zerowall/employees/${document.employee}`
-        : 'zerowall/general';
+        ? `pg_infra/employees/${document.employee}`
+        : 'pg_infra/general';
 
     const replacement = await uploadToCloudinary(req.file.buffer, {
       folder,

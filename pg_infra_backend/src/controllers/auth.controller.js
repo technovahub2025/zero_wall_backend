@@ -308,7 +308,7 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const resetUrl = `${getClientUrl()}/reset-password/${token}`;
   await sendEmail({
     to: user.email,
-    subject: `${process.env.APP_NAME || 'ZEROWALL'} password reset`,
+    subject: `${process.env.APP_NAME || 'pg_infra'} password reset`,
     html: resetEmailTemplate({ name: user.name, resetUrl }),
   });
 

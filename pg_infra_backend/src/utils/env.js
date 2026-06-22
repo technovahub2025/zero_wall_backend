@@ -1,9 +1,32 @@
+const DEFAULT_CLIENT_URL = 'http://localhost:5173';
+
+function normalizeOrigin(value) {
+  const normalized = String(value || '').trim().replace(/[.,/]+$/, '');
+  return normalized || '';
+}
+
+function getClientUrls() {
+  const rawValues = [
+    process.env.CLIENT_URL,
+    process.env.CLIENT_URLS,
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_ORIGIN,
+  ]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(','));
+
+  const urls = rawValues.map(normalizeOrigin).filter(Boolean);
+  if (urls.length > 0) return [...new Set(urls)];
+
+  return [DEFAULT_CLIENT_URL];
+}
+
 function getClientUrl() {
-  const value = process.env.CLIENT_URL || 'http://localhost:5173';
-  const normalized = String(value).trim().replace(/[.,]+$/, '');
-  return normalized || 'http://localhost:5173';
+  return getClientUrls()[0] || DEFAULT_CLIENT_URL;
 }
 
 module.exports = {
   getClientUrl,
+  getClientUrls,
+  normalizeOrigin,
 };
