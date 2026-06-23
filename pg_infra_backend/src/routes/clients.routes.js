@@ -23,6 +23,6 @@ router.post(
   createClient,
 );
 router.put('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), updateClient);
-router.delete('/:id', requireAuth, requireRole('superadmin', 'admin'), deleteClient);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteClient);
 
 module.exports = router;

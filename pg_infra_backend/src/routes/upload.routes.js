@@ -17,7 +17,7 @@ router.post('/asset', legacyUpload.single('file'), uploadAsset);
 router.post('/avatar', requireAuth, uploadAvatar, uploadAvatarController);
 router.post('/document', requireAuth, uploadSingle, uploadDocument);
 router.put('/:publicId', requireAuth, requireRole('superadmin', 'admin'), uploadSingle, updateDocument);
-router.delete('/:publicId', requireAuth, requireRole('superadmin', 'admin'), deleteDocument);
+router.delete('/:publicId', requireAuth, requireRole('superadmin'), deleteDocument);
 router.get('/project/:id', requireAuth, getProjectDocuments);
 
 module.exports = router;

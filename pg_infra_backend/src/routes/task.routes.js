@@ -41,7 +41,7 @@ router.put('/time-extension-requests/:requestId/approve', requireAuth, approveTi
 router.put('/time-extension-requests/:requestId/reject', requireAuth, rejectTimeExtensionRequest);
 router.get('/:id', requireAuth, getTaskById);
 router.put('/:id', requireAuth, updateTask);
-router.delete('/:id', requireAuth, requireRole('superadmin', 'admin'), deleteTask);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteTask);
 router.post('/:id/comments', requireAuth, addComment);
 router.post('/:id/time-extension-requests', requireAuth, createTimeExtensionRequest);
 

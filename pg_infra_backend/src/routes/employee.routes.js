@@ -40,7 +40,7 @@ router.get('/:id/workload', requireAuth, requireRole('superadmin', 'admin', 'pro
 router.get('/:id/timesheets', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployeeTimesheets);
 router.get('/:id/timesheets/export', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), exportTimesheets);
 router.post('/:id/timesheets/bulk-update', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), bulkUpdateTimesheets);
-router.post('/:id/timesheets/bulk-delete', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), bulkDeleteTimesheets);
+router.post('/:id/timesheets/bulk-delete', requireAuth, requireRole('superadmin'), bulkDeleteTimesheets);
 router.get('/:id/documents', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), getEmployeeDocuments);
 
 module.exports = router;

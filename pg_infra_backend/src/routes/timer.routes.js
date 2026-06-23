@@ -1,7 +1,7 @@
 ﻿const express = require('express');
 const { body } = require('express-validator');
 const validateRequest = require('../middleware/validateRequest');
-const { requireAuth } = require('../middleware/auth.middleware');
+const { requireAuth, requireRole } = require('../middleware/auth.middleware');
 const {
   createManualLog,
   deleteTimerLog,
@@ -53,7 +53,7 @@ router.put('/pause', requireAuth, body('reason').notEmpty().trim(), validateRequ
 router.put('/stop', requireAuth, body('reason').notEmpty().trim(), validateRequest, stopTimer);
 router.post('/manual', requireAuth, createManualLog);
 router.post('/logs/bulk-update', requireAuth, bulkUpdateTimesheets);
-router.post('/logs/bulk-delete', requireAuth, bulkDeleteTimesheets);
-router.delete('/:id', requireAuth, deleteTimerLog);
+router.post('/logs/bulk-delete', requireAuth, requireRole('superadmin'), bulkDeleteTimesheets);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteTimerLog);
 
 module.exports = router;

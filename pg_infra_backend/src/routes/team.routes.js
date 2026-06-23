@@ -20,8 +20,8 @@ router.get('/members', requireAuth, requireRole('superadmin', 'admin', 'project_
 router.get('/invites', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), listPendingInvites);
 router.post('/invite', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), inviteMember);
 router.post('/:id/resend', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), resendInvite);
-router.delete('/:id/invite', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), revokeInvite);
+router.delete('/:id/invite', requireAuth, requireRole('superadmin'), revokeInvite);
 router.put('/:id/role', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), changeMemberRole);
-router.delete('/:id', requireAuth, requireRole('superadmin', 'admin'), removeMember);
+router.delete('/:id', requireAuth, requireRole('superadmin'), removeMember);
 
 module.exports = router;

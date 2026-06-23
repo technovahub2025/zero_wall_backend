@@ -22,6 +22,6 @@ router.post(
   createStageGuide,
 );
 router.put('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), updateStageGuide);
-router.delete('/:id', requireAuth, requireRole('superadmin', 'admin'), deleteStageGuide);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteStageGuide);
 
 module.exports = router;

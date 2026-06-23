@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth } = require('../middleware/auth.middleware');
+const { requireAuth, requireRole } = require('../middleware/auth.middleware');
 const {
   deleteNotification,
   getUnreadCount,
@@ -14,6 +14,6 @@ router.get('/', requireAuth, listNotifications);
 router.get('/unread-count', requireAuth, getUnreadCount);
 router.put('/mark-all-read', requireAuth, markAllNotificationsRead);
 router.put('/:id/read', requireAuth, markNotificationRead);
-router.delete('/:id', requireAuth, deleteNotification);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteNotification);
 
 module.exports = router;

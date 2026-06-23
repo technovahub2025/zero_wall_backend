@@ -16,8 +16,8 @@ router.get('/', requireAuth, listTeams);
 router.get('/:id', requireAuth, getTeamById);
 router.post('/', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), createTeam);
 router.put('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), updateTeam);
-router.delete('/:id', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), deleteTeam);
+router.delete('/:id', requireAuth, requireRole('superadmin'), deleteTeam);
 router.post('/:id/members', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), addTeamMembers);
-router.delete('/:id/members/:memberId', requireAuth, requireRole('superadmin', 'admin', 'project_manager'), removeTeamMember);
+router.delete('/:id/members/:memberId', requireAuth, requireRole('superadmin'), removeTeamMember);
 
 module.exports = router;
