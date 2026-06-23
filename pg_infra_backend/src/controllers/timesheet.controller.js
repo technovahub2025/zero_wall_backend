@@ -26,6 +26,34 @@ function normalizeFilterValue(value) {
   return text && text !== 'all' ? text : '';
 }
 
+function toObjectId(value) {
+  return mongoose.isValidObjectId(value) ? new mongoose.Types.ObjectId(value) : value;
+}
+
+function castFilterForAggregate(filter = {}) {
+  const casted = { ...filter };
+  ['user', 'project', 'task', 'stage'].forEach((field) => {
+    if (!casted[field]) return;
+    if (casted[field]?.$in) {
+      casted[field] = { ...casted[field], $in: casted[field].$in.map(toObjectId) };
+      return;
+    }
+    casted[field] = toObjectId(casted[field]);
+  });
+  if (Array.isArray(casted.$or)) {
+    casted.$or = casted.$or.map((clause) => castFilterForAggregate(clause));
+  }
+  return casted;
+}
+
+function getPagination(query = {}) {
+  const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
+  const requestedLimit = Number.parseInt(query.limit || query.pageSize, 10) || 50;
+  const limit = Math.min(100, Math.max(10, requestedLimit));
+  const skip = (page - 1) * limit;
+  return { page, limit, skip };
+}
+
 function buildBasicFilter(query = {}, targetUserId) {
   const filter = {};
   if (targetUserId) {
@@ -290,6 +318,190 @@ function buildTrendRows(dailySummary = [], range = {}) {
   return [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
+async function buildDerivedAggregates(filter = {}, range = {}) {
+  const match = castFilterForAggregate({ ...filter });
+  const pipeline = [
+    { $match: match },
+    {
+      $facet: {
+        totals: [
+          {
+            $group: {
+              _id: null,
+              totalSeconds: { $sum: { $ifNull: ['$duration', 0] } },
+              billableSeconds: { $sum: { $cond: ['$isBillable', { $ifNull: ['$duration', 0] }, 0] } },
+              totalEntries: { $sum: 1 },
+              activeDaysSet: { $addToSet: { $dateToString: { format: '%Y-%m-%d', date: '$date' } } },
+            },
+          },
+        ],
+        daily: [
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
+              duration: { $sum: { $ifNull: ['$duration', 0] } },
+              billable: { $sum: { $cond: ['$isBillable', { $ifNull: ['$duration', 0] }, 0] } },
+              entries: { $sum: 1 },
+              tasks: { $addToSet: '$task' },
+              projects: { $addToSet: '$project' },
+              averageStartMinutes: {
+                $avg: {
+                  $add: [
+                    { $multiply: [{ $hour: '$startTime' }, 60] },
+                    { $minute: '$startTime' },
+                  ],
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ],
+        projects: [
+          {
+            $group: {
+              _id: '$project',
+              duration: { $sum: { $ifNull: ['$duration', 0] } },
+              billable: { $sum: { $cond: ['$isBillable', { $ifNull: ['$duration', 0] }, 0] } },
+              entries: { $sum: 1 },
+            },
+          },
+          { $sort: { duration: -1 } },
+          { $limit: 5 },
+        ],
+        tasks: [
+          {
+            $group: {
+              _id: '$task',
+              duration: { $sum: { $ifNull: ['$duration', 0] } },
+              billable: { $sum: { $cond: ['$isBillable', { $ifNull: ['$duration', 0] }, 0] } },
+              entries: { $sum: 1 },
+            },
+          },
+          { $match: { _id: { $ne: null } } },
+          { $sort: { duration: -1 } },
+          { $limit: 5 },
+        ],
+        weekdays: [
+          {
+            $group: {
+              _id: { $dayOfWeek: '$date' },
+              duration: { $sum: { $ifNull: ['$duration', 0] } },
+              entries: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ],
+        startTimes: [
+          {
+            $group: {
+              _id: null,
+              averageStartMinutes: {
+                $avg: {
+                  $add: [
+                    { $multiply: [{ $hour: '$startTime' }, 60] },
+                    { $minute: '$startTime' },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ];
+
+  const [result = {}] = await TimerLog.aggregate(pipeline);
+  const totals = result.totals?.[0] || {};
+  const dailySummary = (result.daily || []).map((item) => ({
+    date: item._id,
+    duration: Number(item.duration || 0),
+    entries: Number(item.entries || 0),
+    tasks: (item.tasks || []).filter(Boolean).length,
+    projects: (item.projects || []).filter(Boolean).length,
+    billable: Number(item.billable || 0),
+    averageStartMinutes: Number(item.averageStartMinutes || 0),
+  }));
+  const peakDay = dailySummary.reduce((best, item) => (item.duration > (best?.duration || 0) ? item : best), null);
+
+  const projectIds = (result.projects || []).map((item) => item._id).filter(Boolean);
+  const taskIds = (result.tasks || []).map((item) => item._id).filter(Boolean);
+  const [projectRows, taskRows] = await Promise.all([
+    projectIds.length ? Project.find({ _id: { $in: projectIds } }).select('_id projectName clientName invoiceStatus').lean() : [],
+    taskIds.length ? Task.find({ _id: { $in: taskIds } }).select('_id title project').lean() : [],
+  ]);
+  const projectMeta = new Map(projectRows.map((project) => [String(project._id), project]));
+  const taskMeta = new Map(taskRows.map((task) => [String(task._id), task]));
+
+  const topProjects = (result.projects || []).filter((item) => item._id).map((item) => {
+    const meta = projectMeta.get(String(item._id)) || {};
+    return {
+      id: String(item._id),
+      label: meta.projectName || 'Project',
+      clientName: meta.clientName || '',
+      duration: Number(item.duration || 0),
+      billable: Number(item.billable || 0),
+      entries: Number(item.entries || 0),
+      hours: Number((Number(item.duration || 0) / 3600).toFixed(1)),
+      billableHours: Number((Number(item.billable || 0) / 3600).toFixed(1)),
+    };
+  });
+
+  const topTasks = (result.tasks || []).filter((item) => item._id).map((item) => {
+    const meta = taskMeta.get(String(item._id)) || {};
+    return {
+      id: String(item._id),
+      label: meta.title || 'Task',
+      projectName: projectMeta.get(String(meta.project || ''))?.projectName || '',
+      duration: Number(item.duration || 0),
+      billable: Number(item.billable || 0),
+      entries: Number(item.entries || 0),
+      hours: Number((Number(item.duration || 0) / 3600).toFixed(1)),
+      billableHours: Number((Number(item.billable || 0) / 3600).toFixed(1)),
+    };
+  });
+
+  const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const mostProductiveWeekday = (result.weekdays || []).reduce((best, item) => (item.duration > (best?.duration || 0) ? item : best), null);
+  const totalSeconds = Number(totals.totalSeconds || 0);
+  const billableSeconds = Number(totals.billableSeconds || 0);
+
+  return {
+    dailySummary,
+    summary: {
+      totalSeconds,
+      billableSeconds,
+      totalEntries: Number(totals.totalEntries || 0),
+      activeDays: (totals.activeDaysSet || []).filter(Boolean).length,
+      averageHours: dailySummary.length ? Number((totalSeconds / dailySummary.length / 3600).toFixed(2)) : 0,
+      peakDay: peakDay
+        ? {
+            date: peakDay.date,
+            duration: Number(peakDay.duration || 0),
+            entries: Number(peakDay.entries || 0),
+            tasks: Number(peakDay.tasks || 0),
+          }
+        : null,
+      billableRate: totalSeconds ? Number(((billableSeconds / totalSeconds) * 100).toFixed(1)) : 0,
+    },
+    insightsBase: {
+      topProjects,
+      topTasks,
+      productivity: {
+        mostProductiveWeekday: mostProductiveWeekday
+          ? {
+              dayIndex: Number(mostProductiveWeekday._id || 1) - 1,
+              label: weekdayLabels[(Number(mostProductiveWeekday._id || 1) - 1) % 7],
+              duration: Number(mostProductiveWeekday.duration || 0),
+              entries: Number(mostProductiveWeekday.entries || 0),
+            }
+          : null,
+        averageStartTime: result.startTimes?.[0]?.averageStartMinutes ? formatMinutesClock(result.startTimes[0].averageStartMinutes) : null,
+      },
+    },
+    trendRows: buildTrendRows(dailySummary, range),
+  };
+}
+
 async function buildComparison(baseFilter, range) {
   const previousRange = buildPreviousRange(range);
   if (!previousRange) return null;
@@ -334,25 +546,32 @@ function buildCsv(rows = []) {
 
 async function loadTimesheetContext({ targetUserId, query = {} }) {
   const { baseFilter, range } = await buildTimesheetFilter(query, targetUserId);
+  const { page, limit, skip } = getPagination(query);
+  const fullFilter = { ...baseFilter, ...toDateFilter(range) };
+  const optionScopeFilter = targetUserId ? { user: targetUserId } : {};
 
-  const [total, logs, projectIds, taskIds] = await Promise.all([
-    TimerLog.countDocuments({ ...baseFilter, ...toDateFilter(range) }),
-    TimerLog.find({ ...baseFilter, ...toDateFilter(range) })
+  const [total, logs, allMatchingRows, aggregateData, optionProjectIds, optionTaskIds] = await Promise.all([
+    TimerLog.countDocuments(fullFilter),
+    TimerLog.find(fullFilter)
       .sort({ date: -1, startTime: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit)
       .populate('task', 'title status project stage totalTimeLogged')
       .populate('project', 'projectName clientName currentStage overallStatus invoiceStatus')
       .populate('stage', 'stageName stageNo')
       .populate('user', 'name avatar role employeeId')
       .lean(),
-    TimerLog.find({ ...baseFilter, ...toDateFilter(range) }).distinct('project'),
-    TimerLog.find({ ...baseFilter, ...toDateFilter(range) }).distinct('task'),
+    TimerLog.find(fullFilter).select('_id').sort({ date: -1, startTime: -1, _id: -1 }).lean(),
+    buildDerivedAggregates(fullFilter, range),
+    TimerLog.find(optionScopeFilter).distinct('project'),
+    TimerLog.find(optionScopeFilter).distinct('task'),
   ]);
 
-  const projectRows = projectIds.length
-    ? await Project.find({ _id: { $in: projectIds } }).select('_id projectName clientName invoiceStatus').sort({ projectName: 1 }).lean()
+  const projectRows = optionProjectIds.length
+    ? await Project.find({ _id: { $in: optionProjectIds } }).select('_id projectName clientName invoiceStatus').sort({ projectName: 1 }).lean()
     : [];
-  const taskRows = taskIds.length
-    ? await Task.find({ _id: { $in: taskIds } }).select('_id title project').sort({ title: 1 }).lean()
+  const taskRows = optionTaskIds.length
+    ? await Task.find({ _id: { $in: optionTaskIds } }).select('_id title project').sort({ title: 1 }).lean()
     : [];
 
   const projectMeta = new Map(projectRows.map((project) => [String(project._id), project]));
@@ -364,19 +583,17 @@ async function loadTimesheetContext({ targetUserId, query = {} }) {
     taskTitle: taskMeta.get(getEntityId(log.task))?.title || '',
   }));
 
-  const derived = buildDerivedMaps(serializedLogs);
   const comparison = await buildComparison(baseFilter, range);
-  const trendRows = buildTrendRows(derived.dailySummary, range);
-  const billableSeconds = derived.totals.billableSeconds;
-  const totalSeconds = derived.totals.totalSeconds;
+  const billableSeconds = aggregateData.summary.billableSeconds;
+  const totalSeconds = aggregateData.summary.totalSeconds;
   const previousTotalSeconds = comparison?.totalSeconds || 0;
   const previousBillableSeconds = comparison?.billableSeconds || 0;
 
   const insights = {
-    trendRows,
-    topProjects: derived.projectRows.slice(0, 5).map((item) => ({ ...item, hours: Number((item.duration / 3600).toFixed(1)), billableHours: Number((item.billable / 3600).toFixed(1)) })),
-    topTasks: derived.taskRows.slice(0, 5).map((item) => ({ ...item, hours: Number((item.duration / 3600).toFixed(1)), billableHours: Number((item.billable / 3600).toFixed(1)) })),
-    productivity: derived.pattern,
+    trendRows: aggregateData.trendRows,
+    topProjects: aggregateData.insightsBase.topProjects,
+    topTasks: aggregateData.insightsBase.topTasks,
+    productivity: aggregateData.insightsBase.productivity,
     utilization: totalSeconds ? Number(((billableSeconds / totalSeconds) * 100).toFixed(1)) : 0,
     comparison: {
       totalChange: calculateChange(totalSeconds, previousTotalSeconds),
@@ -410,23 +627,24 @@ async function loadTimesheetContext({ targetUserId, query = {} }) {
   return {
     total,
     items: serializedLogs,
-    summary: {
-      totalSeconds,
-      billableSeconds,
-      totalEntries: derived.totals.totalEntries,
-      activeDays: derived.totals.activeDays,
-      averageHours: Number((derived.totals.averageHours / 3600).toFixed(2)),
-      peakDay: derived.totals.peakDay,
-      billableRate: totalSeconds ? Number(((billableSeconds / totalSeconds) * 100).toFixed(1)) : 0,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasNextPage: page * limit < total,
+      hasPreviousPage: page > 1,
     },
-    dailySummary: derived.dailySummary,
+    allMatchingIds: allMatchingRows.map((row) => String(row._id)),
+    summary: aggregateData.summary,
+    dailySummary: aggregateData.dailySummary,
     insights,
     filterOptions,
     range,
     allLogs: serializedLogs,
     projectMeta,
     taskMeta,
-    filter: { ...baseFilter, ...toDateFilter(range) },
+    filter: fullFilter,
   };
 }
 
@@ -464,10 +682,17 @@ const listTimesheetFilters = asyncHandler(async (req, res) => {
 });
 
 const createTimesheetFilter = asyncHandler(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const scope = String(req.body.scope || 'mine').trim() === 'employee' ? 'employee' : 'mine';
+  const existing = await TimesheetFilter.findOne({ user: req.user.id, scope, name });
+  if (existing) {
+    return res.status(409).json({ success: false, message: 'A saved filter with this name already exists' });
+  }
+
   const payload = {
     user: req.user.id,
-    name: String(req.body.name || '').trim(),
-    scope: String(req.body.scope || 'mine').trim() === 'employee' ? 'employee' : 'mine',
+    name,
+    scope,
     employee: req.body.employee || req.body.employeeId || undefined,
     preset: String(req.body.preset || '').trim(),
     start: req.body.start ? new Date(req.body.start) : undefined,
@@ -613,6 +838,32 @@ async function bulkDeleteTimesheets(req, res) {
     return res.status(400).json({ success: false, message: 'Active timers cannot be deleted' });
   }
 
+  if (req.body.name !== undefined) {
+    const nextName = String(req.body.name || '').trim();
+    const nextScope = req.body.scope !== undefined ? (String(req.body.scope || 'mine').trim() === 'employee' ? 'employee' : 'mine') : filter.scope;
+    const duplicate = await TimesheetFilter.findOne({
+      _id: { $ne: filter._id },
+      user: req.user.id,
+      scope: nextScope,
+      name: nextName,
+    });
+    if (duplicate) {
+      return res.status(409).json({ success: false, message: 'A saved filter with this name already exists' });
+    }
+  }
+
+  const taskDurationMap = new Map();
+  logs.forEach((log) => {
+    if (!log.task) return;
+    const taskId = String(log.task);
+    taskDurationMap.set(taskId, (taskDurationMap.get(taskId) || 0) + Number(log.duration || 0));
+  });
+  await Promise.all(
+    [...taskDurationMap.entries()].map(([taskId, duration]) =>
+      Task.updateOne({ _id: taskId }, { $inc: { totalTimeLogged: -Math.abs(duration) } }),
+    ),
+  );
+
   await TimerLog.deleteMany({ _id: { $in: validIds }, user: targetUserId });
 
   try {
@@ -662,15 +913,29 @@ async function exportTimesheets(req, res) {
 
   const selectedIds = normalizeIdList(req.body?.ids || req.query?.ids || req.body?.selectedIds);
   let query = { ...req.query };
+  delete query.page;
+  delete query.limit;
+  delete query.pageSize;
+
+  const { baseFilter, range } = await buildTimesheetFilter(query, targetUserId);
+  const filter = { ...baseFilter, ...toDateFilter(range) };
+  const validSelectedIds = validObjectIds(selectedIds);
   if (selectedIds.length) {
-    query = { ...query };
+    if (!validSelectedIds.length) {
+      return res.status(400).json({ success: false, message: 'No valid logs selected' });
+    }
+    filter._id = { $in: validSelectedIds };
   }
 
-  const context = await loadTimesheetContext({ targetUserId, query });
-  const logs = selectedIds.length
-    ? context.allLogs.filter((log) => selectedIds.includes(String(log.id || log._id || '')))
-    : context.allLogs;
-  const rows = buildSelectedRows(logs);
+  const logs = await TimerLog.find(filter)
+    .sort({ date: -1, startTime: -1, _id: -1 })
+    .populate('task', 'title status project stage totalTimeLogged')
+    .populate('project', 'projectName clientName currentStage overallStatus invoiceStatus')
+    .populate('stage', 'stageName stageNo')
+    .populate('user', 'name avatar role employeeId')
+    .lean();
+
+  const rows = buildSelectedRows(logs.map(serializeTimerLog));
   const csv = buildCsv(rows);
   const fileName = `${String(targetUserId) === String(req.user.id) ? 'my' : 'employee'}-timesheets.csv`;
 

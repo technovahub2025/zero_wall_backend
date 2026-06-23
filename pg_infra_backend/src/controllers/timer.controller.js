@@ -646,22 +646,45 @@ const getMyLogs = asyncHandler(async (req, res) => {
 
 const createManualLog = asyncHandler(async (req, res) => {
   const { projectId, taskId, stageId, startTime, endTime, duration, note = '', date } = req.body;
+  const start = startTime ? new Date(startTime) : null;
+  const end = endTime ? new Date(endTime) : null;
+
+  if (!start || Number.isNaN(start.getTime()) || !end || Number.isNaN(end.getTime())) {
+    return res.status(400).json({ success: false, message: 'Valid start and end times are required' });
+  }
+
+  if (end.getTime() <= start.getTime()) {
+    return res.status(400).json({ success: false, message: 'End time must be after start time' });
+  }
 
   const project = await Project.findById(projectId);
   if (!project) {
     return res.status(404).json({ success: false, message: 'Project not found' });
   }
 
+  let task = null;
+  if (taskId) {
+    task = await Task.findById(taskId);
+    if (!task) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+    if (String(task.project || '') !== String(project._id)) {
+      return res.status(400).json({ success: false, message: 'Task does not belong to the selected project' });
+    }
+  }
+
+  const durationSeconds = Math.max(1, Math.floor((end.getTime() - start.getTime()) / 1000));
+
   const log = await TimerLog.create({
     user: req.user.id,
     project: projectId,
     task: taskId || undefined,
-    stage: stageId || undefined,
-    startTime: startTime ? new Date(startTime) : new Date(),
-    endTime: endTime ? new Date(endTime) : undefined,
-    duration: Number(duration || 0),
+    stage: stageId || task?.stage || undefined,
+    startTime: start,
+    endTime: end,
+    duration: durationSeconds,
     note,
-    date: date ? normalizeDateOnly(date) : normalizeDateOnly(),
+    date: normalizeDateOnly(date || start),
     isManual: true,
     isBillable: defaultBillableFromProject(project),
     isActive: false,
@@ -716,6 +739,10 @@ const deleteTimerLog = asyncHandler(async (req, res) => {
 
   if (String(log.user) !== String(req.user.id) && !['superadmin', 'admin'].includes(req.user.role)) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
+  if (log.isActive) {
+    return res.status(400).json({ success: false, message: 'Active timers cannot be deleted' });
   }
 
   await subtractDurationFromTask(log.task, log.duration);
