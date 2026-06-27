@@ -42,6 +42,17 @@ function normalizeStageGuideInput(body = {}, existing = null) {
   };
 }
 
+async function safeLogStageGuideActivity(payload) {
+  try {
+    await logActivity({
+      ...payload,
+      entityType: 'other',
+    });
+  } catch (_error) {
+    // Stage guide persistence should not fail if activity logging does.
+  }
+}
+
 const listStageGuides = asyncHandler(async (_req, res) => {
   const stageGuides = await StageGuide.find({}).sort({ sequenceOrder: 1, stageNo: 1, createdAt: 1 });
 
@@ -62,10 +73,9 @@ const createStageGuide = asyncHandler(async (req, res) => {
     createdBy: req.user?.id || null,
   });
 
-  await logActivity({
+  await safeLogStageGuideActivity({
     actor: req.user?.id || null,
     action: 'stage_guide_created',
-    entityType: 'stage-guide',
     entityId: stageGuide._id,
     title: `${stageGuide.stageName} added`,
     detail: `${stageGuide.stageNo} was added to the stage guide.`,
@@ -94,10 +104,9 @@ const updateStageGuide = asyncHandler(async (req, res) => {
   stageGuide.updatedBy = req.user?.id || null;
   await stageGuide.save();
 
-  await logActivity({
+  await safeLogStageGuideActivity({
     actor: req.user?.id || null,
     action: 'stage_guide_updated',
-    entityType: 'stage-guide',
     entityId: stageGuide._id,
     title: `${stageGuide.stageName} updated`,
     detail: `${stageGuide.stageNo} stage guide was updated.`,
@@ -124,10 +133,9 @@ const deleteStageGuide = asyncHandler(async (req, res) => {
 
   await stageGuide.deleteOne();
 
-  await logActivity({
+  await safeLogStageGuideActivity({
     actor: req.user?.id || null,
     action: 'stage_guide_deleted',
-    entityType: 'stage-guide',
     entityId: stageGuide._id,
     title: `${stageGuide.stageName} deleted`,
     detail: `${stageGuide.stageNo} stage guide was removed.`,

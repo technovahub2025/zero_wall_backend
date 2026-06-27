@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "dev:full": "concurrently \"npm run dev --prefix ../pg_infra_frontend\" \"nodemon src/server.js\""
+    "dev:full": "concurrently \"npm run dev --prefix ../pg_infra_frontend\" \"nodemon src/server.js\"",
+    "seed:superadmin": "node scripts/seed-superadmin.js",
+    "lint": "eslint src --ext .js",
+    "test": "jest"
   },
   "keywords": [],
   "author": "",

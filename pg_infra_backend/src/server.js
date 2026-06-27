@@ -24,54 +24,11 @@ const connectDB = require('./config/db');
 const { createServer } = require('http');
 const { initSocket } = require('./config/socket');
 const { startCronJobs } = require('./utils/cronJobs');
-const User = require('./models/User');
 
 const PORT = process.env.PORT || 5000;
 
-const DEFAULT_SUPERADMIN = {
-  name: 'Super Admin',
-  email: 'superadmin@gmail.com',
-  password: 'Password@123',
-  role: 'superadmin',
-};
-
-async function ensureDefaultSuperadmin() {
-  const user = await User.findOne({ email: DEFAULT_SUPERADMIN.email });
-
-  if (!user) {
-    const superadmin = new User({
-      name: DEFAULT_SUPERADMIN.name,
-      email: DEFAULT_SUPERADMIN.email,
-      role: DEFAULT_SUPERADMIN.role,
-      isActive: true,
-    });
-    superadmin.password = DEFAULT_SUPERADMIN.password;
-    await superadmin.save();
-    console.log(`Default superadmin created: ${DEFAULT_SUPERADMIN.email}`);
-    return;
-  }
-
-  let changed = false;
-
-  if (user.role !== DEFAULT_SUPERADMIN.role) {
-    user.role = DEFAULT_SUPERADMIN.role;
-    changed = true;
-  }
-
-  if (!user.isActive) {
-    user.isActive = true;
-    changed = true;
-  }
-
-  if (changed) {
-    await user.save();
-    console.log(`Default superadmin updated: ${DEFAULT_SUPERADMIN.email}`);
-  }
-}
-
 async function bootstrap() {
   await connectDB();
-  await ensureDefaultSuperadmin();
 
   const server = createServer(app);
   const io = initSocket(server);

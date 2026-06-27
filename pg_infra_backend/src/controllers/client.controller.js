@@ -3,6 +3,7 @@ const Client = require('../models/Client');
 const { syncClientsFromProjects, findClientByName } = require('../utils/clientSync');
 const { logActivity } = require('../utils/logActivity');
 const { emitToAll } = require('../config/socket');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 function toProjectIds(value) {
   if (!value) return [];
@@ -118,6 +119,13 @@ const createClient = asyncHandler(async (req, res) => {
     link: '/clients',
     metadata: { clientName: populated.clientName },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'client_created',
+    resource: 'client',
+    resourceId: String(populated._id),
+  });
 
   emitToAll('client:created', serializeClient(populated));
 
@@ -155,6 +163,13 @@ const updateClient = asyncHandler(async (req, res) => {
     link: '/clients',
     metadata: { clientName: populated.clientName },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'client_updated',
+    resource: 'client',
+    resourceId: String(populated._id),
+  });
 
   emitToAll('client:updated', serializeClient(populated));
 
@@ -178,6 +193,13 @@ const deleteClient = asyncHandler(async (req, res) => {
     tone: 'rose',
     link: '/clients',
     metadata: { clientName: client.clientName },
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'client_deleted',
+    resource: 'client',
+    resourceId: String(client._id),
   });
 
   emitToAll('client:deleted', { id: String(client._id), clientName: client.clientName });

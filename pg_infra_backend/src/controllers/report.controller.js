@@ -412,7 +412,7 @@ function summarizeOverview({ projects = [], tasks = [], invoices = [], logs = []
   const byPriority = countBy(projects, 'priority');
   const byTaskStatus = countBy(tasks, 'status');
   const taskProgress = summarizeTaskProgress(tasks);
-
+ 
   const billing = invoices.reduce(
     (acc, invoice) => {
       acc.received += Number(invoice.amountReceived || 0);

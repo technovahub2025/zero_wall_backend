@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Project = require('../models/Project');
 const Stage = require('../models/Stage');
 const { getFileType } = require('../models/Document');
+const { logAuditEvent, logUploadAttempt } = require('../middleware/auditLog');
 
 const cloudinary = configureCloudinary();
 
@@ -50,11 +51,41 @@ const uploadAsset = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'No file uploaded' });
   }
 
+  await logUploadAttempt({
+    req,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    size: req.file.size,
+    outcome: 'attempt',
+  });
+
+  const result = await uploadToCloudinary(req.file.buffer, {
+    folder: 'pg_infra/assets',
+    use_filename: true,
+    unique_filename: true,
+    resource_type: 'auto',
+  });
+  await logUploadAttempt({
+    req,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    size: req.file.size,
+    outcome: 'success',
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'file_uploaded',
+    resource: 'upload',
+    resourceId: result.public_id,
+    metadata: { filename: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size },
+  });
+
   return res.status(201).json({
     success: true,
     data: {
-      url: req.file.path,
-      publicId: req.file.filename || req.file.public_id || '',
+      url: result.secure_url,
+      publicId: result.public_id,
       mimetype: req.file.mimetype,
       size: req.file.size,
     },
@@ -97,6 +128,14 @@ const uploadAvatar = asyncHandler(async (req, res) => {
   user.avatar = result.secure_url;
   user.avatarPublicId = result.public_id;
   await user.save();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'file_uploaded',
+    resource: 'avatar',
+    resourceId: result.public_id,
+    metadata: { employeeId: targetUserId, mimeType: req.file.mimetype, size: req.file.size },
+  });
 
   return res.json({
     success: true,
@@ -167,6 +206,22 @@ const uploadDocument = asyncHandler(async (req, res) => {
     .populate('stage', 'stageName stageNo')
     .populate('employee', 'name avatar role employeeId');
 
+  await logUploadAttempt({
+    req,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    size: req.file.size,
+    outcome: 'success',
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'file_uploaded',
+    resource: 'document',
+    resourceId: String(document._id),
+    metadata: { filename: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size },
+  });
+
   return res.status(201).json({
     success: true,
     message: 'Document uploaded',
@@ -188,6 +243,13 @@ const deleteDocument = asyncHandler(async (req, res) => {
 
   await cloudinary.uploader.destroy(publicId, { resource_type: 'auto' });
   await document.deleteOne();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'file_deleted',
+    resource: 'document',
+    resourceId: publicId,
+  });
 
   return res.json({
     success: true,
@@ -238,6 +300,14 @@ const updateDocument = asyncHandler(async (req, res) => {
     document.fileType = getFileType(req.file.mimetype);
     document.mimeType = req.file.mimetype;
     document.size = req.file.size;
+    await logAuditEvent({
+      req,
+      userId: req.user?.id || null,
+      action: 'file_uploaded',
+      resource: 'document',
+      resourceId: String(document._id),
+      metadata: { filename: document.originalName, mimeType: req.file.mimetype, size: req.file.size },
+    });
   }
 
   await document.save();

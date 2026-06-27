@@ -9,6 +9,7 @@ const { emitToProject, emitToAll } = require('../config/socket');
 const { sanitizeProjectData } = require('../utils/sanitize');
 const { logActivity } = require('../utils/logActivity');
 const { upsertClientProjectLink, removeProjectFromClient } = require('../utils/clientSync');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 const KANBAN_OVERVIEW_STAGES = [
   'Concept Design',
@@ -301,6 +302,13 @@ const createProject = asyncHandler(async (req, res) => {
     link: `/projects/${projectRow.id}`,
     metadata: { projectName: projectRow.projectName },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'project_created',
+    resource: 'project',
+    resourceId: String(projectRow.id),
+  });
 
   return res.status(201).json({
     success: true,
@@ -343,6 +351,13 @@ const updateProject = asyncHandler(async (req, res) => {
     link: `/projects/${projectRow.id}`,
     metadata: { projectName: projectRow.projectName },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'project_updated',
+    resource: 'project',
+    resourceId: String(projectRow.id),
+  });
 
   return res.json({
     success: true,
@@ -382,6 +397,13 @@ const deleteProject = asyncHandler(async (req, res) => {
     tone: 'rose',
     link: '/projects',
     metadata: { projectName },
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'project_deleted',
+    resource: 'project',
+    resourceId: projectId,
   });
 
   return res.json({

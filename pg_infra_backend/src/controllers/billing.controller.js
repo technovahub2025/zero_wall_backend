@@ -4,6 +4,7 @@ const Project = require('../models/Project');
 const { notifyAdmins, createNotification } = require('../utils/createNotification');
 const { emitToAdmin } = require('../config/socket');
 const { logActivity } = require('../utils/logActivity');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 function serializeInvoice(invoice) {
   const item = invoice.toObject ? invoice.toObject({ virtuals: true }) : invoice;
@@ -167,6 +168,13 @@ const createInvoice = asyncHandler(async (req, res) => {
       invoiceNo: populated.invoiceNo || '',
     },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'invoice_created',
+    resource: 'invoice',
+    resourceId: String(populated._id),
+  });
 
   return res.status(201).json({
     success: true,
@@ -236,6 +244,13 @@ const updateInvoice = asyncHandler(async (req, res) => {
       billingStatus: populated.billingStatus,
     },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'invoice_updated',
+    resource: 'invoice',
+    resourceId: String(populated._id),
+  });
 
   return res.json({
     success: true,
@@ -280,6 +295,13 @@ const deleteInvoice = asyncHandler(async (req, res) => {
       projectName: invoice.project?.projectName || '',
       invoiceNo: invoice.invoiceNo || '',
     },
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'invoice_deleted',
+    resource: 'invoice',
+    resourceId: String(invoice._id),
   });
 
   return res.json({ success: true, message: 'Invoice deleted' });

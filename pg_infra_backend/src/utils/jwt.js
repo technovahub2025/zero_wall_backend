@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 function getAccessSecret() {
-  return process.env.JWT_ACCESS_SECRET || process.env.JWT_ACCESS_SECRET;
+  return process.env.JWT_ACCESS_SECRET;
 }
 
 function getRefreshSecret() {

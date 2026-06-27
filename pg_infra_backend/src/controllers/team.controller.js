@@ -10,6 +10,7 @@ const { emitToUser } = require('../config/socket');
 const { sanitizeUser } = require('../utils/sanitize');
 const { getClientUrl } = require('../utils/env');
 const { getTokenExpiryMs } = require('../utils/tokenExpiry');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 function normalizeRole(role) {
   const allowed = ['superadmin', 'employee', 'admin', 'project_manager'];
@@ -23,26 +24,47 @@ function canAssignRole(actorRole, nextRole) {
 }
 
 const listTeam = asyncHandler(async (req, res) => {
+  const userRole = req.user?.role;
   const team = await TeamMember.find().sort({ name: 1 });
+  const isPrivileged = ['superadmin', 'admin', 'project_manager'].includes(userRole);
+  const currentUserId = String(req.user?.id || '');
+  const currentUserEmail = String(req.user?.email || '').trim().toLowerCase();
+  const visibleTeam = isPrivileged
+    ? team
+    : team.filter((member) => String(member.email || '').trim().toLowerCase() === currentUserEmail || String(member._id) === currentUserId);
+
   return res.json({
     success: true,
-    data: team.map((member) => ({
-      id: member._id,
-      initials: member.initials,
-      name: member.name,
-      role: member.role,
-      projects: member.projects,
-      color: member.color,
-      online: member.online,
-      email: member.email,
-      phone: member.phone,
-      isActive: member.isActive,
-    })),
+    data: visibleTeam.map((member) => {
+      const payload = {
+        id: member._id,
+        initials: member.initials,
+        name: member.name,
+        role: member.role,
+        projects: member.projects,
+        color: member.color,
+        isActive: member.isActive,
+      };
+
+      if (isPrivileged) {
+        payload.online = member.online;
+        payload.email = member.email;
+        payload.phone = member.phone;
+      }
+
+      return payload;
+    }),
   });
 });
 
 const createTeamMember = asyncHandler(async (req, res) => {
   const member = await TeamMember.create(req.body);
+  await logAuditEvent({
+    req,
+    action: 'team_member_added',
+    resource: 'team-member',
+    resourceId: String(member._id),
+  });
   return res.status(201).json({
     success: true,
     data: {
@@ -300,6 +322,15 @@ const inviteMember = asyncHandler(async (req, res) => {
     await Project.updateMany({ _id: { $in: normalizedProjectIds } }, { $addToSet: { assignedTeam: user._id } });
   }
 
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'team_member_invited',
+    resource: 'user',
+    resourceId: String(user._id),
+    metadata: { sendInvite, role: user.role },
+  });
+
   return res.status(201).json({
     success: true,
     message: sendInvite ? 'Invite sent' : 'Member added',
@@ -314,6 +345,13 @@ const resendInvite = asyncHandler(async (req, res) => {
   }
 
   await buildInvite(user, req.user);
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'team_invite_resent',
+    resource: 'user',
+    resourceId: String(user._id),
+  });
   return res.json({ success: true, message: 'Invite resent', data: serializeUser(user) });
 });
 
@@ -330,6 +368,13 @@ const revokeInvite = asyncHandler(async (req, res) => {
   user.inviteTokenHistory = [];
   user.isActive = false;
   await user.save();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'team_invite_revoked',
+    resource: 'user',
+    resourceId: String(user._id),
+  });
   return res.json({ success: true, message: 'Invite revoked' });
 });
 
@@ -344,6 +389,14 @@ const changeMemberRole = asyncHandler(async (req, res) => {
   }
   user.role = normalizeRole(req.body.role);
   await user.save();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'team_role_changed',
+    resource: 'user',
+    resourceId: String(user._id),
+    metadata: { role: user.role },
+  });
 
   emitToUser(String(user._id), 'role:changed', { role: user.role });
   await createNotification({
@@ -372,6 +425,13 @@ const removeMember = asyncHandler(async (req, res) => {
 
   user.isActive = false;
   await user.save();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'team_member_removed',
+    resource: 'user',
+    resourceId: String(user._id),
+  });
   return res.json({ success: true, message: 'Member deactivated', data: serializeUser(user) });
 });
 

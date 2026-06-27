@@ -19,6 +19,7 @@ const billingRoutes = require('./routes/billing.routes');
 const clientsRoutes = require('./routes/clients.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const activityRoutes = require('./routes/activity.routes');
+const auditRoutes = require('./routes/audit.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const stageGuideRoutes = require('./routes/stageGuide.routes');
 const kanbanRoutes = require('./routes/kanban.routes');
@@ -28,20 +29,14 @@ const employeeRoutes = require('./routes/employee.routes');
 const timerRoutes = require('./routes/timer.routes');
 const timesheetRoutes = require('./routes/timesheet.routes');
 const { notFound, errorHandler } = require('./middleware/error.middleware');
-const {
-  securityHeaders,
-  sanitizeMongo,
-  sanitizeXSS,
-  authRateLimit,
-  uploadRateLimit,
-  apiRateLimit,
-} = require('./middleware/securityMiddleware');
+const { sanitizeMongo, sanitizeXSS, authRateLimit, uploadRateLimit, apiRateLimit } = require('./middleware/securityMiddleware');
 const {
   requestTimer,
   jsonSizeLimit,
   cacheControl,
 } = require('./middleware/performanceMiddleware');
 const { getClientUrls } = require('./utils/env');
+const { issueCsrfToken, requireCsrf } = require('./middleware/csrf');
 
 const app = express();
 app.disable('x-powered-by');
@@ -63,18 +58,35 @@ app.use(
   cors(corsOptions),
 );
 app.options(/.*/, cors(corsOptions));
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'default-src': ["'self'"],
+        'img-src': ["'self'", 'data:', 'blob:', 'https://res.cloudinary.com'],
+        'media-src': ["'self'", 'blob:', 'https://res.cloudinary.com'],
+        'connect-src': ["'self'", ...allowedOrigins, 'https://res.cloudinary.com', 'wss:'],
+        'font-src': ["'self'", 'https://fonts.gstatic.com', 'https://fonts.googleapis.com', 'data:'],
+        'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        'script-src': ["'self'"],
+      },
+    },
+  }),
+);
 app.use(compression());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(securityHeaders);
 app.use(sanitizeMongo);
 app.use(sanitizeXSS);
 app.use(requestTimer);
 app.use(jsonSizeLimit);
 app.use(cacheControl());
+app.use(issueCsrfToken);
+app.use(requireCsrf);
 
 app.use('/api', apiRateLimit);
 app.use('/api/auth', authRateLimit);
@@ -94,11 +106,11 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/clients', clientsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/activity-logs', activityRoutes);
+app.use('/api/audit-logs', auditRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/stage-guide', stageGuideRoutes);
 app.use('/api/kanban', kanbanRoutes);
 app.use('/api/monitor', monitorRoutes);
-app.use('/api/uploads', uploadRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/timer', timerRoutes);
 app.use('/api/timesheet-filters', timesheetRoutes);

@@ -1,7 +1,7 @@
 const express = require('express');
 const { requireAuth, requireRole } = require('../middleware/auth.middleware');
-const legacyUpload = require('../middleware/upload.middleware');
 const { uploadSingle, uploadAvatar } = require('../middleware/uploadMiddleware');
+const { requireUploadContentType, rejectUnsupportedUploadType } = require('../middleware/uploadValidation');
 const {
   deleteDocument,
   getProjectDocuments,
@@ -13,7 +13,7 @@ const {
 
 const router = express.Router();
 
-router.post('/asset', legacyUpload.single('file'), uploadAsset);
+router.post('/asset', requireAuth, requireUploadContentType, uploadSingle, rejectUnsupportedUploadType, uploadAsset);
 router.post('/avatar', requireAuth, uploadAvatar, uploadAvatarController);
 router.post('/document', requireAuth, uploadSingle, uploadDocument);
 router.put('/:publicId', requireAuth, requireRole('superadmin', 'admin'), uploadSingle, updateDocument);

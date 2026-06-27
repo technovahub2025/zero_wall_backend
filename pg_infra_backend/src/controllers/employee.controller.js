@@ -11,6 +11,7 @@ const { emitToUser } = require('../config/socket');
 const { getClientUrl } = require('../utils/env');
 const { serializeTasksWithRequests } = require('./task.controller');
 const { getTokenExpiryMs } = require('../utils/tokenExpiry');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 function serializeEmployee(user) {
   const item = user.toObject ? user.toObject({ virtuals: true }) : user;
@@ -265,6 +266,14 @@ const createEmployee = asyncHandler(async (req, res) => {
     await sendInviteIfRequested(employee, req);
   }
 
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'employee_created',
+    resource: 'employee',
+    resourceId: String(employee._id),
+  });
+
   return res.status(201).json({
     success: true,
     message: sendInvite ? 'Invite sent' : 'Employee created',
@@ -338,6 +347,14 @@ const updateEmployee = asyncHandler(async (req, res) => {
     await sendInviteIfRequested(employee, req);
   }
 
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'employee_updated',
+    resource: 'employee',
+    resourceId: String(employee._id),
+  });
+
   return res.json({
     success: true,
     message: sendInvite ? 'Invite sent' : 'Employee updated',
@@ -369,6 +386,14 @@ const updateEmployeeRole = asyncHandler(async (req, res) => {
     link: '/profile',
     metadata: { projectName: '' },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'employee_role_changed',
+    resource: 'employee',
+    resourceId: String(employee._id),
+    metadata: { role },
+  });
 
   return res.json({
     success: true,
@@ -395,6 +420,13 @@ const deleteEmployee = asyncHandler(async (req, res) => {
 
   const data = serializeEmployee(employee);
   await employee.deleteOne();
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'employee_deleted',
+    resource: 'employee',
+    resourceId: String(employee._id),
+  });
 
   return res.json({
     success: true,

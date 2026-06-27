@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const RefreshToken = require('../models/RefreshToken');
 
 function getAccessSecret() {
-  return process.env.JWT_ACCESS_SECRET || process.env.JWT_ACCESS_SECRET;
+  return process.env.JWT_ACCESS_SECRET;
 }
 
 function getRefreshSecret() {
@@ -36,7 +36,7 @@ async function sendTokenResponse(user, statusCode, res) {
   const cookieOptions = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000,
   };
 

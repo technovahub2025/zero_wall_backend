@@ -6,6 +6,7 @@ const { serializeProject } = require('./project.controller');
 const { createNotification } = require('../utils/createNotification');
 const { emitToProject } = require('../config/socket');
 const { logActivity } = require('../utils/logActivity');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 function serializeStage(stage) {
   const doc = stage.toObject ? stage.toObject({ virtuals: true }) : stage;
@@ -133,6 +134,13 @@ const createStage = asyncHandler(async (req, res) => {
       stageName: stage.stageName,
     },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'stage_created',
+    resource: 'stage',
+    resourceId: String(stage._id),
+  });
 
   return res.status(201).json({
     success: true,
@@ -166,6 +174,13 @@ const updateStage = asyncHandler(async (req, res) => {
       stageName: stage.stageName,
     },
   });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'stage_updated',
+    resource: 'stage',
+    resourceId: String(stage._id),
+  });
 
   return res.json({
     success: true,
@@ -198,6 +213,13 @@ const deleteStage = asyncHandler(async (req, res) => {
       projectName: project?.projectName || '',
       stageName: stage.stageName,
     },
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'stage_deleted',
+    resource: 'stage',
+    resourceId: String(stage._id),
   });
 
   return res.json({
@@ -255,6 +277,13 @@ const approveStage = asyncHandler(async (req, res) => {
       stageName: stage.stageName,
       action,
     },
+  });
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: action === 'approve' ? 'stage_approved' : 'stage_rejected',
+    resource: 'stage',
+    resourceId: String(stage._id),
   });
 
   const recipient = project?.responsibleEngineer?._id || project?.createdBy?._id || null;

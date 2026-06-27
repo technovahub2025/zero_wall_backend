@@ -14,6 +14,7 @@ const {
 } = require('../utils/sendEmail');
 const { verifyRefreshToken } = require('../utils/jwt');
 const { getClientUrl } = require('../utils/env');
+const { logAuditEvent } = require('../middleware/auditLog');
 
 const allowedRoles = ['superadmin', 'admin', 'project_manager', 'employee'];
 
@@ -21,7 +22,7 @@ function cookieOptions() {
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
   };
 }
 
@@ -173,6 +174,12 @@ const login = asyncHandler(async (req, res) => {
   });
 
   if (!user || !user.passwordHash) {
+    await logAuditEvent({
+      req,
+      action: 'login_failed',
+      resource: 'auth',
+      metadata: { identifier: loginValue },
+    });
     return res.status(401).json({
       success: false,
       message: 'Invalid credentials',
@@ -181,6 +188,13 @@ const login = asyncHandler(async (req, res) => {
 
   const valid = await user.matchPassword(password);
   if (!valid) {
+    await logAuditEvent({
+      req,
+      action: 'login_failed',
+      resource: 'auth',
+      resourceId: String(user._id),
+      metadata: { identifier: loginValue },
+    });
     return res.status(401).json({
       success: false,
       message: 'Invalid credentials',
@@ -196,6 +210,13 @@ const login = asyncHandler(async (req, res) => {
 
   user.lastLogin = new Date();
   await user.save();
+  await logAuditEvent({
+    req,
+    userId: user._id,
+    action: 'login',
+    resource: 'auth',
+    resourceId: String(user._id),
+  });
 
   return sendTokenResponse(user, 200, res);
 });
@@ -231,7 +252,7 @@ const me = asyncHandler(async (req, res) => {
 });
 
 const refreshToken = asyncHandler(async (req, res) => {
-  const token = req.cookies?.refreshToken || req.body?.refreshToken;
+  const token = req.cookies?.refreshToken;
   if (!token) {
     return res.status(401).json({ success: false, message: 'Refresh token missing' });
   }
@@ -286,6 +307,19 @@ const logout = asyncHandler(async (req, res) => {
 
   res.clearCookie('accessToken', accessCookieOptions());
   res.clearCookie('refreshToken', refreshCookieOptions());
+  res.clearCookie('pg-csrf-token', {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+  });
+
+  await logAuditEvent({
+    req,
+    userId: req.user?.id || null,
+    action: 'logout',
+    resource: 'auth',
+    resourceId: req.user?.id ? String(req.user.id) : null,
+  });
 
   return res.json({ success: true, message: 'Logged out' });
 });
